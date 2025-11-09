@@ -41,9 +41,9 @@ else:
 DATA_DIR = os.path.join(PATH, 'Data')
 
 
-n_epoch = 2
+n_epoch = 20
 BATCH_SIZE = 30
-LR = 0.001
+LR = 0.0001
 
 ## Image processing
 CHANNELS = 3
@@ -129,14 +129,42 @@ class Dataset(data.Dataset):
 
         if img is None:
             print(f"Warning: Could not read image {file}")
-            # Create a black placeholder image
             img = np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
         else:
             img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
 
-        # Augmentation only for train
-        X = torch.FloatTensor(img)
+        # DATA AUGMENTATION for training only
+        if self.type_data == 'train':
+            # Horizontal flip (50% chance)
+            if random.random() > 0.5:
+                img = cv2.flip(img, 1)
 
+            # Brightness adjustment (50% chance)
+            if random.random() > 0.5:
+                brightness = random.uniform(0.7, 1.3)
+                img = np.clip(img * brightness, 0, 255).astype(np.uint8)
+
+            # Rotation (50% chance)
+            if random.random() > 0.5:
+                angle = random.randint(-20, 20)
+                M = cv2.getRotationMatrix2D((IMAGE_SIZE // 2, IMAGE_SIZE // 2), angle, 1)
+                img = cv2.warpAffine(img, M, (IMAGE_SIZE, IMAGE_SIZE))
+
+            # Gaussian noise (30% chance)
+            if random.random() > 0.7:
+                noise = np.random.normal(0, 5, img.shape)
+                img = np.clip(img + noise, 0, 255).astype(np.uint8)
+
+        # Convert BGR to RGB (OpenCV loads as BGR, ResNet expects RGB)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Normalize for pretrained models (ImageNet stats)
+        img = img.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        img = (img - mean) / std
+
+        X = torch.FloatTensor(img)
         X = torch.reshape(X, (3, IMAGE_SIZE, IMAGE_SIZE))
 
         return X, y
@@ -187,26 +215,39 @@ def save_model(model):
 
     print(model, file=open('summary_{}.txt'.format(NICKNAME), "w"))
 
-def model_definition(pretrained=False):
+def model_definition(pretrained=True):
     # Define a Keras sequential model
     # Compile the model
 
+    # Load pretrained ResNet18 model
+
     if pretrained == True:
         model = models.resnet18(pretrained=True)
-        model.fc = nn.Linear(model.fc.in_features, OUTPUTS_a)
+        # Replace final layer with dropout for regularization
+        num_features = model.fc.in_features
+        model.fc = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(num_features, OUTPUTS_a)
+        )
     else:
         model = CNN(OUTPUTS_a)
 
     model = model.to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    # Use AdamW optimizer with weight decay
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
 
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=0)
+    # More patient scheduler for pretrained model
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+
+    # Add this print statement right after the scheduler line
+    print(f"Scheduler initialized with patience=3, will reduce LR by 0.5x when plateau detected")
 
     save_model(model)
 
     return model, optimizer, criterion, scheduler
+
 
 def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pretrained = False):
     # Use a breakpoint in the code line below to debug your script.
@@ -244,6 +285,10 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
 
                 loss = criterion(output, xtarget)
                 loss.backward()
+
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 optimizer.step()
                 train_loss += loss.item()
                 cont += 1
@@ -352,6 +397,11 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
                 met_test = dat
 
         print(xstrres)
+
+        # Update learning rate scheduler based on test performance
+        scheduler.step(met_test)
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Current learning rate: {current_lr:.6f}")
 
         if met_test > met_test_best and SAVE_MODEL:
 
@@ -521,4 +571,4 @@ if __name__ == '__main__':
     list_of_metrics = ['f1_macro']
     list_of_agg = ['avg']
 
-    train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro', pretrained=False)
+    train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro', pretrained=True)

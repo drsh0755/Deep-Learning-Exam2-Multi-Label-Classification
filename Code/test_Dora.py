@@ -136,9 +136,14 @@ class Dataset(data.Dataset):
         else:
             img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
 
-        # Augmentation only for train
-        X = torch.FloatTensor(img)
+        # IMAGENET NORMALIZATION (Critical for ResNet!)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        img = (img - mean) / std
 
+        X = torch.FloatTensor(img)
         X = torch.reshape(X, (3, IMAGE_SIZE, IMAGE_SIZE))
 
         return X, y
@@ -169,13 +174,20 @@ def read_data(target_type):
 
     return test_generator
 
-def model_definition(pretrained=False):
+def model_definition(pretrained=True):
     # Define a Keras sequential model
     # Compile the model
 
+    # Load model matching training architecture
+
     if pretrained == True:
-        model = models.resnet18(pretrained=False)
-        model.fc = nn.Linear(model.fc.in_features, OUTPUTS_a)
+        model = models.resnet18(pretrained=False)  # Don't download weights again
+        # Match the training architecture with dropout
+        num_features = model.fc.in_features
+        model.fc = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(num_features, OUTPUTS_a)
+        )
     else:
         model = CNN(OUTPUTS_a)
 
@@ -381,4 +393,4 @@ if __name__ == '__main__':
     list_of_metrics = ['f1_macro']
     list_of_agg = ['avg']
 
-    test_model(test_ds, list_of_metrics, list_of_agg, pretrained=False)
+    test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True)
