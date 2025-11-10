@@ -15,11 +15,29 @@ from torchvision import models
 from tqdm import tqdm
 import os
 import argparse
+from sklearn.model_selection import train_test_split
+import logging
+from datetime import datetime
 
 
-'''
-LAST UPDATED 11/10/2021, lsdr
-'''
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Create log filename with timestamp
+log_filename = f'logs/training_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+
+# Configure logging to both file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()  # Also print to console
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
 
 ## Process images in parallel
 
@@ -133,27 +151,54 @@ class Dataset(data.Dataset):
         else:
             img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
 
-        # DATA AUGMENTATION for training only
-        if self.type_data == 'train':
-            # Horizontal flip (50% chance)
-            if random.random() > 0.5:
-                img = cv2.flip(img, 1)
+            # DATA AUGMENTATION for training only
+            if self.type_data == 'train':
+                # Horizontal flip (50% chance)
+                if random.random() > 0.5:
+                    img = cv2.flip(img, 1)
 
-            # Brightness adjustment (50% chance)
-            if random.random() > 0.5:
-                brightness = random.uniform(0.7, 1.3)
-                img = np.clip(img * brightness, 0, 255).astype(np.uint8)
+                # Brightness adjustment (50% chance)
+                if random.random() > 0.5:
+                    brightness = random.uniform(0.7, 1.3)
+                    img = np.clip(img * brightness, 0, 255).astype(np.uint8)
 
-            # Rotation (50% chance)
-            if random.random() > 0.5:
-                angle = random.randint(-20, 20)
-                M = cv2.getRotationMatrix2D((IMAGE_SIZE // 2, IMAGE_SIZE // 2), angle, 1)
-                img = cv2.warpAffine(img, M, (IMAGE_SIZE, IMAGE_SIZE))
+                # Rotation (50% chance)
+                if random.random() > 0.5:
+                    angle = random.randint(-20, 20)
+                    M = cv2.getRotationMatrix2D((IMAGE_SIZE // 2, IMAGE_SIZE // 2), angle, 1)
+                    img = cv2.warpAffine(img, M, (IMAGE_SIZE, IMAGE_SIZE))
 
-            # Gaussian noise (30% chance)
-            if random.random() > 0.7:
-                noise = np.random.normal(0, 5, img.shape)
-                img = np.clip(img + noise, 0, 255).astype(np.uint8)
+                # Gaussian noise (30% chance) - UNINDENTED
+                if random.random() > 0.7:
+                    noise = np.random.normal(0, 5, img.shape)
+                    img = np.clip(img + noise, 0, 255).astype(np.uint8)
+
+                # Random crop and resize (40% chance) - UNINDENTED
+                if random.random() > 0.6:
+                    crop_ratio = random.uniform(0.8, 1.0)  # Crop 80-100% of image
+                    crop_size = int(IMAGE_SIZE * crop_ratio)
+                    top = random.randint(0, IMAGE_SIZE - crop_size)
+                    left = random.randint(0, IMAGE_SIZE - crop_size)
+                    img = img[top:top + crop_size, left:left + crop_size]
+                    img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
+
+                # Random blur (30% chance) - UNINDENTED
+                if random.random() > 0.7:
+                    kernel_size = random.choice([3, 5, 7])
+                    img = cv2.GaussianBlur(img, (kernel_size, kernel_size), 0)
+
+                # Color saturation adjustment (40% chance) - UNINDENTED
+                if random.random() > 0.6:
+                    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+                    hsv[:, :, 1] = hsv[:, :, 1] * random.uniform(0.6, 1.4)  # Saturation
+                    hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+                    img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+                # Random contrast (40% chance) - UNINDENTED
+                if random.random() > 0.6:
+                    alpha = random.uniform(0.7, 1.3)  # Contrast
+                    img = np.clip(alpha * img, 0, 255).astype(np.uint8)
+
 
         # Convert BGR to RGB (OpenCV loads as BGR, ResNet expects RGB)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -223,10 +268,23 @@ def model_definition(pretrained=True):
 
     if pretrained == True:
         model = models.resnet18(pretrained=True)
+        # Freeze early layers (conv1, bn1, layer1, layer2, layer3)
+        # Only train layer4 and fc (final layers)
+        layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2', 'layer3']
+
+        for name, param in model.named_parameters():
+            # Check if parameter belongs to layers we want to freeze
+            if any(layer in name for layer in layers_to_freeze):
+                param.requires_grad = False  # Freeze this parameter
+
+        print("Frozen layers: conv1, bn1, layer1, layer2, layer3")
+        print("Training layers: layer4, fc")
+        # 👆 END OF FREEZING CODE 👆
+
         # Replace final layer with dropout for regularization
         num_features = model.fc.in_features
         model.fc = nn.Sequential(
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(num_features, OUTPUTS_a)
         )
     else:
@@ -235,7 +293,7 @@ def model_definition(pretrained=True):
     model = model.to(device)
 
     # Use AdamW optimizer with weight decay
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-3)
     criterion = nn.BCEWithLogitsLoss()
 
     # More patient scheduler for pretrained model
@@ -245,6 +303,16 @@ def model_definition(pretrained=True):
     print(f"Scheduler initialized with patience=3, will reduce LR by 0.5x when plateau detected")
 
     save_model(model)
+    # Count trainable parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+
+    logger.info(f"Model: ResNet18 (pretrained={pretrained})")
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
+    logger.info(f"Frozen parameters: {total_params - trainable_params:,}")
+    logger.info(f"Optimizer: AdamW (lr={LR}, weight_decay={optimizer.param_groups[0]['weight_decay']})")
+    logger.info(f"Scheduler: ReduceLROnPlateau (patience=3)")
 
     return model, optimizer, criterion, scheduler
 
@@ -263,6 +331,9 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
     model.phase = 0
 
     met_test_best = 0
+    # Early stopping variables
+    patience_counter = 0
+    patience_limit = 5  # Stop if no improvement for 5 epochs
     for epoch in range(n_epoch):
         train_loss, steps_train = 0, 0
 
@@ -397,11 +468,33 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
                 met_test = dat
 
         print(xstrres)
+        logger.info(xstrres)
 
         # Update learning rate scheduler based on test performance
         scheduler.step(met_test)
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Current learning rate: {current_lr:.6f}")
+        logger.info(f"Learning rate: {current_lr:.6f}")
+        logger.info(f"Train loss: {avg_train_loss:.5f} | Test loss: {avg_test_loss:.5f}")
+
+        # Early stopping check
+        if met_test > met_test_best:
+            patience_counter = 0  # Reset counter when improving
+        else:
+            patience_counter += 1
+            print(f"⚠️  No improvement for {patience_counter}/{patience_limit} epochs")
+            logger.warning(f"No improvement for {patience_counter}/{patience_limit} epochs")
+
+            if patience_counter >= patience_limit:
+                print(f"\n🛑 Early stopping triggered!")
+                logger.info("=" * 70)
+                logger.info("EARLY STOPPING TRIGGERED!")
+                print(f"Best validation F1: {met_test_best:.5f}")
+                logger.info(f"Best validation F1: {met_test_best:.5f}")
+                logger.info(f"Stopped at epoch {epoch}")
+                logger.info("=" * 70)
+
+                break  # Exit training loop
 
         if met_test > met_test_best and SAVE_MODEL:
 
@@ -419,7 +512,17 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
 
             xdf_dset_results.to_excel('results_{}.xlsx'.format(NICKNAME), index = False)
             print("The model has been saved!")
+            logger.info(f"✓ NEW BEST MODEL SAVED! F1: {met_test:.5f} (previous: {met_test_best:.5f})")
             met_test_best = met_test
+
+    logger.info("=" * 70)
+    logger.info("TRAINING COMPLETED!")
+    logger.info(f"Best validation F1: {met_test_best:.5f}")
+    logger.info(f"Total epochs trained: {epoch + 1}")
+    logger.info(f"Final learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+    logger.info(f"Model saved as: model_{NICKNAME}.pt")
+    logger.info(f"Results saved as: results_{NICKNAME}.xlsx")
+    logger.info("=" * 70)
 
 
 def metrics_func(metrics, aggregates, y_true, y_pred):
@@ -548,6 +651,21 @@ if __name__ == '__main__':
     # Reading and filtering Excel file
     xdf_data = pd.read_excel(FILE_NAME)
 
+    # CONFIGURATION LOGGING
+    logger.info("=" * 70)
+    logger.info("TRAINING CONFIGURATION")
+    logger.info("=" * 70)
+    logger.info(f"Log file: {log_filename}")
+    logger.info(f"Device: {device}")
+    logger.info(f"Nickname: {NICKNAME}")
+    logger.info(f"Epochs: {n_epoch}")
+    logger.info(f"Batch Size: {BATCH_SIZE}")
+    logger.info(f"Learning Rate: {LR}")
+    logger.info(f"Image Size: {IMAGE_SIZE}")
+    logger.info(f"Threshold: {THRESHOLD}")
+    logger.info(f"Excel file: {FILE_NAME}")
+    logger.info("=" * 70)
+
     ## Process Classes
     ## Input and output
 
@@ -558,17 +676,87 @@ if __name__ == '__main__':
 
     ## Comment
 
-    xdf_dset = xdf_data[xdf_data["split"] == 'train'].copy()
+    xdf_train_full = xdf_data[xdf_data["split"] == 'train'].copy()
 
-    xdf_dset_test= xdf_data[xdf_data["split"] == 'test'].copy()
+    # Split training data: 85% train, 15% validation
+    # Try stratified split, fall back to regular split if fails
+    try:
+        xdf_dset, xdf_dset_test = train_test_split(
+            xdf_train_full,
+            test_size=0.15,
+            random_state=42,
+            stratify=xdf_train_full['target']
+        )
+        print("Using stratified split")
+        logger.info("Using stratified split")
+    except ValueError:
+        print("Stratified split failed (rare classes), using random split")
+        logger.warning("Stratified split failed (rare classes), using random split")
+        xdf_dset, xdf_dset_test = train_test_split(
+            xdf_train_full,
+            test_size=0.15,
+            random_state=42,
+            shuffle=True
+        )
+
+    # Reset indices so dataloader works correctly
+    xdf_dset = xdf_dset.reset_index(drop=True)
+    xdf_dset_test = xdf_dset_test.reset_index(drop=True)
+
+    print(f"Training samples: {len(xdf_dset)}")
+    print(f"Validation samples: {len(xdf_dset_test)}")
+
+    #DATASET LOGGING
+    logger.info(f"Training samples: {len(xdf_dset)}")
+    logger.info(f"Validation samples: {len(xdf_dset_test)}")
 
     ## read_data creates the dataloaders, take target_type = 2
 
-    train_ds,test_ds = read_data(target_type = 2)
+    train_ds, test_ds = read_data(target_type=2)
 
     OUTPUTS_a = len(class_names)
+
+    logger.info(f"Number of classes: {OUTPUTS_a}")
+    logger.info(f"Class names: {class_names}")
+    logger.info(f"Training batches: {len(train_ds)}")
+    logger.info(f"Validation batches: {len(test_ds)}")
+    logger.info("=" * 70)
+    logger.info("Starting training...")
+    logger.info("=" * 70)
+
 
     list_of_metrics = ['f1_macro']
     list_of_agg = ['avg']
 
-    train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro', pretrained=True)
+    #ERROR HANDLING
+    try:
+        train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro', pretrained=True)
+    except Exception as e:
+        logger.error("=" * 70)
+        logger.error("TRAINING FAILED!")
+        logger.error(f"Error: {str(e)}")
+        logger.error("=" * 70)
+        raise  # Re-raise the error
+
+    # Create a quick summary file
+    summary_file = f'training_summary_{NICKNAME}.txt'
+    with open(summary_file, 'w') as f:
+        f.write(f"Training Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Nickname: {NICKNAME}\n")
+        f.write(f"Device: {device}\n")
+        f.write(f"Epochs: {n_epoch}\n")
+        f.write(f"Learning Rate: {LR}\n")
+        f.write(f"Dropout: 0.5\n")
+        f.write(f"Weight Decay: 0.001\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Training samples: {len(xdf_dset)}\n")
+        f.write(f"Validation samples: {len(xdf_dset_test)}\n")
+        f.write(f"Number of classes: {OUTPUTS_a}\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Full log: {log_filename}\n")
+        f.write(f"Model: model_{NICKNAME}.pt\n")
+        f.write(f"Results: results_{NICKNAME}.xlsx\n")
+
+    logger.info(f"Summary saved to: {summary_file}")
+

@@ -201,7 +201,7 @@ def model_definition(pretrained=True):
     return model, criterion
 
 
-def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=False):
+def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
     # Create the test instructions to
     # Load the model
     # Create the loop to validate the data
