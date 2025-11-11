@@ -71,7 +71,7 @@ NICKNAME = "Dora"
 
 mlb = MultiLabelBinarizer()
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-THRESHOLD = 0.5
+THRESHOLD = 0.35
 SAVE_MODEL = True
 
 
@@ -1130,32 +1130,20 @@ if __name__ == '__main__':
 
     ## Comment
 
-    xdf_train_full = xdf_data[xdf_data["split"] == 'train'].copy()
-
-    # Split training data: 85% train, 15% validation
-    # Try stratified split, fall back to regular split if fails
-    try:
-        xdf_dset, xdf_dset_test = train_test_split(
-            xdf_train_full,
-            test_size=0.15,
-            random_state=42,
-            stratify=xdf_train_full['target']
-        )
-        print("Using stratified split")
-        logger.info("Using stratified split")
-    except ValueError:
-        print("Stratified split failed (rare classes), using random split")
-        logger.warning("Stratified split failed (rare classes), using random split")
-        xdf_dset, xdf_dset_test = train_test_split(
-            xdf_train_full,
-            test_size=0.15,
-            random_state=42,
-            shuffle=True
-        )
+    xdf_dset = xdf_data[xdf_data["split"] == 'train'].copy()
+    xdf_dset_test = xdf_data[xdf_data["split"] == 'test'].copy()
 
     # Reset indices so dataloader works correctly
     xdf_dset = xdf_dset.reset_index(drop=True)
     xdf_dset_test = xdf_dset_test.reset_index(drop=True)
+
+    print(f"✓ Using ACTUAL test split for validation")
+    print(f"Training samples: {len(xdf_dset)}")
+    print(f"Validation samples: {len(xdf_dset_test)}")
+
+    logger.info(f"Training samples: {len(xdf_dset)}")
+    logger.info(f"Validation samples: {len(xdf_dset_test)}")
+
 
     print(f"Training samples: {len(xdf_dset)}")
     print(f"Validation samples: {len(xdf_dset_test)}")

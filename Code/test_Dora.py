@@ -55,7 +55,7 @@ NICKNAME = "Dora"
 
 mlb = MultiLabelBinarizer()
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-THRESHOLD = 0.5
+THRESHOLD = 0.35
 
 
 #---- Define the model ---- #
