@@ -15,11 +15,29 @@ from torchvision import models
 from tqdm import tqdm
 import os
 import argparse
+from sklearn.model_selection import train_test_split
+import logging
+from datetime import datetime
 
 
-'''
-LAST UPDATED 11/10/2021, lsdr
-'''
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Create log filename with timestamp
+log_filename = f'logs/training_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+
+# Configure logging to both file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()  # Also print to console
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
 
 ## Process images in parallel
 
@@ -41,13 +59,13 @@ else:
 DATA_DIR = os.path.join(PATH, 'Data')
 
 
-n_epoch = 20
-BATCH_SIZE = 30
+n_epoch = 30
+BATCH_SIZE = 32
 LR = 0.0001
 
 ## Image processing
 CHANNELS = 3
-IMAGE_SIZE = 100
+IMAGE_SIZE = 128
 
 NICKNAME = "Dora"
 
@@ -82,8 +100,9 @@ class Dataset(data.Dataset):
     '''
     From : https://stanford.edu/~shervine/blog/pytorch-how-to-generate-data-parallel
     '''
-    def __init__(self, list_IDs, type_data, target_type):
+    def __init__(self, list_IDs, type_data, target_type, use_mixup=False):
         #Initialization'
+        self.use_mixup = use_mixup
         self.type_data = type_data
         self.list_IDs = list_IDs
         self.target_type = target_type
@@ -133,27 +152,54 @@ class Dataset(data.Dataset):
         else:
             img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
 
-        # DATA AUGMENTATION for training only
-        if self.type_data == 'train':
-            # Horizontal flip (50% chance)
-            if random.random() > 0.5:
-                img = cv2.flip(img, 1)
+            # DATA AUGMENTATION for training only
+            if self.type_data == 'train':
+                # Horizontal flip (50% chance)
+                if random.random() > 0.5:
+                    img = cv2.flip(img, 1)
 
-            # Brightness adjustment (50% chance)
-            if random.random() > 0.5:
-                brightness = random.uniform(0.7, 1.3)
-                img = np.clip(img * brightness, 0, 255).astype(np.uint8)
+                # Brightness adjustment (50% chance)
+                if random.random() > 0.5:
+                    brightness = random.uniform(0.7, 1.3)
+                    img = np.clip(img * brightness, 0, 255).astype(np.uint8)
 
-            # Rotation (50% chance)
-            if random.random() > 0.5:
-                angle = random.randint(-20, 20)
-                M = cv2.getRotationMatrix2D((IMAGE_SIZE // 2, IMAGE_SIZE // 2), angle, 1)
-                img = cv2.warpAffine(img, M, (IMAGE_SIZE, IMAGE_SIZE))
+                # Rotation (50% chance)
+                if random.random() > 0.5:
+                    angle = random.randint(-20, 20)
+                    M = cv2.getRotationMatrix2D((IMAGE_SIZE // 2, IMAGE_SIZE // 2), angle, 1)
+                    img = cv2.warpAffine(img, M, (IMAGE_SIZE, IMAGE_SIZE))
 
-            # Gaussian noise (30% chance)
-            if random.random() > 0.7:
-                noise = np.random.normal(0, 5, img.shape)
-                img = np.clip(img + noise, 0, 255).astype(np.uint8)
+                # Gaussian noise (30% chance) - UNINDENTED
+                if random.random() > 0.7:
+                    noise = np.random.normal(0, 5, img.shape)
+                    img = np.clip(img + noise, 0, 255).astype(np.uint8)
+
+                # Random crop and resize (40% chance) - UNINDENTED
+                if random.random() > 0.6:
+                    crop_ratio = random.uniform(0.8, 1.0)  # Crop 80-100% of image
+                    crop_size = int(IMAGE_SIZE * crop_ratio)
+                    top = random.randint(0, IMAGE_SIZE - crop_size)
+                    left = random.randint(0, IMAGE_SIZE - crop_size)
+                    img = img[top:top + crop_size, left:left + crop_size]
+                    img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE))
+
+                # Random blur (30% chance) - UNINDENTED
+                if random.random() > 0.7:
+                    kernel_size = random.choice([3, 5, 7])
+                    img = cv2.GaussianBlur(img, (kernel_size, kernel_size), 0)
+
+                # Color saturation adjustment (40% chance) - UNINDENTED
+                if random.random() > 0.6:
+                    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+                    hsv[:, :, 1] = hsv[:, :, 1] * random.uniform(0.6, 1.4)  # Saturation
+                    hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+                    img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+                # Random contrast (40% chance) - UNINDENTED
+                if random.random() > 0.6:
+                    alpha = random.uniform(0.7, 1.3)  # Contrast
+                    img = np.clip(alpha * img, 0, 255).astype(np.uint8)
+
 
         # Convert BGR to RGB (OpenCV loads as BGR, ResNet expects RGB)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -166,6 +212,17 @@ class Dataset(data.Dataset):
 
         X = torch.FloatTensor(img)
         X = torch.reshape(X, (3, IMAGE_SIZE, IMAGE_SIZE))
+
+        # Mixup augmentation (only for training)
+        if self.type_data == 'train' and self.use_mixup and random.random() > 0.5:
+            # Get another random sample
+            mix_idx = random.randint(0, len(self.list_IDs) - 1)
+            X2, y2 = self.__getitem__(mix_idx)
+
+            # Mixup
+            lam = np.random.beta(0.2, 0.2)
+            X = lam * X + (1 - lam) * X2
+            y = lam * y + (1 - lam) * y2
 
         return X, y
 
@@ -197,7 +254,7 @@ def read_data(target_type):
     params = {'batch_size': BATCH_SIZE,
               'shuffle': True}
 
-    training_set = Dataset(partition['train'], 'train', target_type)
+    training_set = Dataset(partition['train'], 'train', target_type, use_mixup=False)
     training_generator = data.DataLoader(training_set, **params)
 
     params = {'batch_size': BATCH_SIZE,
@@ -215,44 +272,212 @@ def save_model(model):
 
     print(model, file=open('summary_{}.txt'.format(NICKNAME), "w"))
 
-def model_definition(pretrained=True):
-    # Define a Keras sequential model
-    # Compile the model
 
-    # Load pretrained ResNet18 model
+def model_definition(pretrained=True, unfreeze_stage='initial', use_focal_loss=False, label_smoothing=0.0, training_data=None):
+    """
+    Define model architecture with flexible unfreezing strategy
+
+    Args:
+        pretrained: Use pretrained ResNet18
+        unfreeze_stage: 'initial', 'partial', or 'full'
+            - 'initial': Train only layer4 + fc (epochs 0-10)
+            - 'partial': Train layer3 + layer4 + fc (epochs 10-20)
+            - 'full': Train all layers (epochs 20+)
+        use_focal_loss: Use Focal Loss instead of BCE
+        label_smoothing: Label smoothing factor (0.0 = no smoothing, 0.1 = 10% smoothing)
+    """
 
     if pretrained == True:
-        model = models.resnet18(pretrained=True)
-        # Replace final layer with dropout for regularization
-        num_features = model.fc.in_features
-        model.fc = nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(num_features, OUTPUTS_a)
-        )
-    else:
-        model = CNN(OUTPUTS_a)
+        # Load pretrained ResNet34 (more capacity)
+        model = models.resnet34(pretrained=True)
+        logger.info("Using ResNet34 (larger model)")
 
+        # Implement progressive unfreezing strategy
+        if unfreeze_stage == 'initial':
+            # Stage 1: Freeze conv1, bn1, layer1, layer2, layer3
+            # Only train layer4 and fc
+            layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2', 'layer3']
+
+            for name, param in model.named_parameters():
+                if any(layer in name for layer in layers_to_freeze):
+                    param.requires_grad = False
+
+            logger.info("🔒 Freezing Strategy: INITIAL")
+            logger.info("   Frozen: conv1, bn1, layer1, layer2, layer3")
+            logger.info("   Training: layer4, fc")
+
+        elif unfreeze_stage == 'partial':
+            # Stage 2: Freeze conv1, bn1, layer1, layer2
+            # Train layer3, layer4, and fc
+            layers_to_freeze = ['conv1', 'bn1', 'layer1', 'layer2']
+
+            for name, param in model.named_parameters():
+                if any(layer in name for layer in layers_to_freeze):
+                    param.requires_grad = False
+
+            logger.info("🔓 Freezing Strategy: PARTIAL")
+            logger.info("   Frozen: conv1, bn1, layer1, layer2")
+            logger.info("   Training: layer3, layer4, fc")
+
+        elif unfreeze_stage == 'full':
+            # Stage 3: Train all layers
+            for param in model.parameters():
+                param.requires_grad = True
+
+            logger.info("🔥 Freezing Strategy: FULL")
+            logger.info("   Training: ALL LAYERS")
+
+        else:
+            raise ValueError(f"Invalid unfreeze_stage: {unfreeze_stage}")
+
+        # Replace final fully connected layer with improved architecture
+        num_features = model.fc.in_features
+
+        # Enhanced classifier head with two-layer MLP
+        model.fc = nn.Sequential(
+            nn.Dropout(0.3),  # First dropout
+            nn.Linear(num_features, 512),  # Intermediate layer
+            nn.ReLU(),  # Activation
+            nn.BatchNorm1d(512),  # Batch normalization
+            nn.Dropout(0.2),  # Second dropout (lighter)
+            nn.Linear(512, OUTPUTS_a)  # Output layer
+        )
+
+        logger.info(f"✓ Classifier head: 512 → {OUTPUTS_a} with dropout (0.3, 0.2)")
+
+    else:
+        # Use simple CNN if not pretrained
+        model = CNN(OUTPUTS_a)
+        logger.info("Using simple CNN (non-pretrained)")
+
+    # Move model to device
     model = model.to(device)
 
-    # Use AdamW optimizer with weight decay
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
+    # Optimizer: AdamW with weight decay for regularization
+    # Reduced weight decay from 0.01 to 0.001 for better learning
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=LR,
+        weight_decay=1e-3,  # 0.001 instead of 0.01
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
 
-    # More patient scheduler for pretrained model
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+    # Loss function selection
+    if use_focal_loss:
+        # Focal Loss: Better for class imbalance
+        class FocalLoss(nn.Module):
+            def __init__(self, alpha=0.25, gamma=2.0):
+                super().__init__()
+                self.alpha = alpha
+                self.gamma = gamma
 
-    # Add this print statement right after the scheduler line
-    print(f"Scheduler initialized with patience=3, will reduce LR by 0.5x when plateau detected")
+            def forward(self, pred, target):
+                bce_loss = nn.functional.binary_cross_entropy_with_logits(
+                    pred, target, reduction='none'
+                )
+                pt = torch.exp(-bce_loss)
+                focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+                return focal_loss.mean()
 
+        criterion = FocalLoss(alpha=0.25, gamma=2.0)
+        logger.info("Loss: Focal Loss (alpha=0.25, gamma=2.0)")
+
+
+
+    elif label_smoothing > 0:
+
+        # BCE with Label Smoothing (NO class weights due to extreme imbalance)
+
+        class BCEWithLogitsLossSmooth(nn.Module):
+
+            def __init__(self, smoothing=0.1):
+                super().__init__()
+
+                self.smoothing = smoothing
+
+            def forward(self, pred, target):
+                # Smooth labels: 1 → (1 - smoothing), 0 → smoothing/2
+
+                target_smooth = target * (1 - self.smoothing) + 0.5 * self.smoothing
+
+                return nn.functional.binary_cross_entropy_with_logits(pred, target_smooth)
+
+        criterion = BCEWithLogitsLossSmooth(smoothing=label_smoothing)
+
+        logger.info(f"Loss: BCE with Label Smoothing (smoothing={label_smoothing})")
+
+    else:
+        # Standard BCE Loss
+        criterion = nn.BCEWithLogitsLoss()
+        logger.info("Loss: BCEWithLogitsLoss")
+
+    # Learning rate scheduler: ReduceLROnPlateau
+    # More patient than before (patience=5 instead of 3)
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='max',  # Maximize F1 score
+        factor=0.5,  # Reduce LR by 50%
+        patience=5,  # Wait 5 epochs before reducing
+        min_lr=1e-7  # Don't go below this LR
+    )
+
+    # Alternative: Cosine Annealing with Warm Restarts
+    # Uncomment to use instead of ReduceLROnPlateau
+    # from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+    # scheduler = CosineAnnealingWarmRestarts(
+    #     optimizer,
+    #     T_0=10,              # Initial restart period
+    #     T_mult=2,            # Period multiplier after restart
+    #     eta_min=1e-6         # Minimum learning rate
+    # )
+    # logger.info("Scheduler: CosineAnnealingWarmRestarts (T_0=10, T_mult=2)")
+
+    # Save model architecture
     save_model(model)
+
+    # Count parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    frozen_params = total_params - trainable_params
+
+    # Log model information
+    logger.info("=" * 70)
+    logger.info("MODEL ARCHITECTURE")
+    logger.info("=" * 70)
+    logger.info(f"Model: ResNet18 (pretrained={pretrained})")
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
+    logger.info(f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.1f}%)")
+    logger.info("=" * 70)
+    logger.info("OPTIMIZER & SCHEDULER")
+    logger.info("=" * 70)
+    logger.info(f"Optimizer: AdamW")
+    logger.info(f"  - Learning Rate: {LR}")
+    logger.info(f"  - Weight Decay: {optimizer.param_groups[0]['weight_decay']}")
+    logger.info(f"  - Betas: (0.9, 0.999)")
+    logger.info(f"Scheduler: ReduceLROnPlateau")
+    logger.info(f"  - Mode: max (maximize F1)")
+    logger.info(f"  - Factor: 0.5 (reduce by 50%)")
+    logger.info(f"  - Patience: 5 epochs")
+    logger.info(f"  - Min LR: 1e-7")
+    logger.info("=" * 70)
 
     return model, optimizer, criterion, scheduler
 
 
-def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pretrained = False):
+def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on,
+                   pretrained=False, unfreeze_stage='initial',
+                   use_focal_loss=False, label_smoothing=0.0,
+                   stage_epochs=10):
     # Use a breakpoint in the code line below to debug your script.
 
-    model, optimizer, criterion, scheduler = model_definition(pretrained)
+    model, optimizer, criterion, scheduler = model_definition(
+        pretrained=pretrained,
+        unfreeze_stage=unfreeze_stage,
+        use_focal_loss=use_focal_loss,
+        label_smoothing=label_smoothing
+    )
 
     cont = 0
     train_loss_item = list([])
@@ -263,7 +488,10 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
     model.phase = 0
 
     met_test_best = 0
-    for epoch in range(n_epoch):
+    # Early stopping variables
+    patience_counter = 0
+    patience_limit = 5  # Stop if no improvement for 5 epochs
+    for epoch in range(stage_epochs):
         train_loss, steps_train = 0, 0
 
         model.train()
@@ -397,11 +625,33 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
                 met_test = dat
 
         print(xstrres)
+        logger.info(xstrres)
 
         # Update learning rate scheduler based on test performance
         scheduler.step(met_test)
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Current learning rate: {current_lr:.6f}")
+        logger.info(f"Learning rate: {current_lr:.6f}")
+        logger.info(f"Train loss: {avg_train_loss:.5f} | Test loss: {avg_test_loss:.5f}")
+
+        # Early stopping check
+        if met_test > met_test_best:
+            patience_counter = 0  # Reset counter when improving
+        else:
+            patience_counter += 1
+            print(f"⚠️  No improvement for {patience_counter}/{patience_limit} epochs")
+            logger.warning(f"No improvement for {patience_counter}/{patience_limit} epochs")
+
+            if patience_counter >= patience_limit:
+                print(f"\n🛑 Early stopping triggered!")
+                logger.info("=" * 70)
+                logger.info("EARLY STOPPING TRIGGERED!")
+                print(f"Best validation F1: {met_test_best:.5f}")
+                logger.info(f"Best validation F1: {met_test_best:.5f}")
+                logger.info(f"Stopped at epoch {epoch}")
+                logger.info("=" * 70)
+
+                break  # Exit training loop
 
         if met_test > met_test_best and SAVE_MODEL:
 
@@ -419,7 +669,17 @@ def train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on, pre
 
             xdf_dset_results.to_excel('results_{}.xlsx'.format(NICKNAME), index = False)
             print("The model has been saved!")
+            logger.info(f"✓ NEW BEST MODEL SAVED! F1: {met_test:.5f} (previous: {met_test_best:.5f})")
             met_test_best = met_test
+
+    logger.info("=" * 70)
+    logger.info("TRAINING COMPLETED!")
+    logger.info(f"Best validation F1: {met_test_best:.5f}")
+    logger.info(f"Total epochs trained: {epoch + 1}")
+    logger.info(f"Final learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+    logger.info(f"Model saved as: model_{NICKNAME}.pt")
+    logger.info(f"Results saved as: results_{NICKNAME}.xlsx")
+    logger.info("=" * 70)
 
 
 def metrics_func(metrics, aggregates, y_true, y_pred):
@@ -499,6 +759,31 @@ def metrics_func(metrics, aggregates, y_true, y_pred):
 
     return res_dict
 
+
+def find_optimal_threshold(pred_logits, real_labels, thresholds=np.arange(0.3, 0.7, 0.05)):
+    """
+    Find optimal threshold for each class independently
+    Returns array of optimal thresholds per class
+    """
+    best_thresholds = []
+
+    for class_idx in range(pred_logits.shape[1]):
+        best_f1 = 0
+        best_thresh = 0.5
+
+        for threshold in thresholds:
+            pred_binary = (pred_logits[:, class_idx] >= threshold).astype(int)
+            f1 = f1_score(real_labels[:, class_idx], pred_binary, average='binary', zero_division=0)
+
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thresh = threshold
+
+        best_thresholds.append(best_thresh)
+
+    logger.info(f"✓ Optimal thresholds per class: {[f'{t:.2f}' for t in best_thresholds]}")
+    return np.array(best_thresholds)
+
 def process_target(target_type):
     '''
         1- Binary   target = (1,0)
@@ -539,6 +824,278 @@ def process_target(target_type):
     return class_names
 
 
+def calculate_class_weights(xdf_train):
+    """
+    Calculate weights for imbalanced classes using inverse frequency
+    """
+    class_counts = np.zeros(10)
+
+    for target_str in xdf_train['target_class']:
+        labels = [int(x) for x in target_str.split(',')]
+        class_counts += np.array(labels)
+
+    # Inverse frequency weighting
+    total_samples = len(xdf_train)
+    weights = total_samples / (10 * class_counts + 1e-6)  # Small epsilon to avoid division by zero
+
+    # Normalize weights so they average to 1
+    weights = weights / weights.mean()
+
+    weights_tensor = torch.FloatTensor(weights).to(device)
+
+    logger.info(f"Class frequencies: {class_counts.astype(int)}")
+    logger.info(f"Class weights: {[f'{w:.3f}' for w in weights]}")
+
+    return weights_tensor
+
+
+def train_progressive_unfreezing(train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro'):
+    """
+    Train model with progressive unfreezing strategy in 3 stages
+    """
+
+    logger.info("=" * 70)
+    logger.info("🚀 STARTING PROGRESSIVE UNFREEZING TRAINING")
+    logger.info("=" * 70)
+
+    best_f1_overall = 0.0
+
+    # ==================== STAGE 1: Initial Training ====================
+    logger.info("\n" + "=" * 70)
+    logger.info("STAGE 1: Training final layers only (layer4 + fc)")
+    logger.info("Epochs: 10")
+    logger.info("=" * 70)
+
+    model, optimizer, criterion, scheduler = model_definition(
+        pretrained=True,
+        unfreeze_stage='initial',
+        use_focal_loss=False,
+        label_smoothing=0.1,  # Use label smoothing
+        training_data=xdf_dset  # Pass training data for class weights
+    )
+
+    # Train stage 1
+    best_f1_stage1 = train_single_stage(
+        model, optimizer, criterion, scheduler,
+        train_ds, test_ds, list_of_metrics, list_of_agg,
+        save_on=save_on, stage_epochs=10, stage_name="Stage1"
+    )
+
+    logger.info(f"✓ Stage 1 completed! Best F1: {best_f1_stage1:.5f}")
+    best_f1_overall = max(best_f1_overall, best_f1_stage1)
+
+    # ==================== STAGE 2: Partial Unfreezing ====================
+    logger.info("\n" + "=" * 70)
+    logger.info("STAGE 2: Unfreezing more layers (layer3 + layer4 + fc)")
+    logger.info("Epochs: 10")
+    logger.info("=" * 70)
+
+    model, optimizer, criterion, scheduler = model_definition(
+        pretrained=True,
+        unfreeze_stage='partial',
+        use_focal_loss=False,
+        label_smoothing=0.1,
+        training_data=xdf_dset
+    )
+
+    # Load best model from stage 1
+    model.load_state_dict(torch.load(f'model_{NICKNAME}.pt'))
+    logger.info("✓ Loaded best model from Stage 1")
+
+    # Reduce learning rate for fine-tuning
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = LR * 0.5  # Half the learning rate
+    logger.info(f"✓ Reduced learning rate to {LR * 0.5}")
+
+    # Train stage 2
+    best_f1_stage2 = train_single_stage(
+        model, optimizer, criterion, scheduler,
+        train_ds, test_ds, list_of_metrics, list_of_agg,
+        save_on=save_on, stage_epochs=10, stage_name="Stage2"
+    )
+
+    logger.info(f"✓ Stage 2 completed! Best F1: {best_f1_stage2:.5f}")
+    best_f1_overall = max(best_f1_overall, best_f1_stage2)
+
+    # ==================== STAGE 3: Full Unfreezing ====================
+    logger.info("\n" + "=" * 70)
+    logger.info("STAGE 3: Fine-tuning all layers")
+    logger.info("Epochs: 10")
+    logger.info("=" * 70)
+
+    model, optimizer, criterion, scheduler = model_definition(
+        pretrained=True,
+        unfreeze_stage='full',
+        use_focal_loss=False,
+        label_smoothing=0.1,
+        training_data=xdf_dset
+    )
+
+    # Load best model from stage 2
+    model.load_state_dict(torch.load(f'model_{NICKNAME}.pt'))
+    logger.info("✓ Loaded best model from Stage 2")
+
+    # Further reduce learning rate for full fine-tuning
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = LR * 0.1  # Even lower LR
+    logger.info(f"✓ Reduced learning rate to {LR * 0.1}")
+
+    # Train stage 3
+    best_f1_stage3 = train_single_stage(
+        model, optimizer, criterion, scheduler,
+        train_ds, test_ds, list_of_metrics, list_of_agg,
+        save_on=save_on, stage_epochs=10, stage_name="Stage3"
+    )
+
+    logger.info(f"✓ Stage 3 completed! Best F1: {best_f1_stage3:.5f}")
+    best_f1_overall = max(best_f1_overall, best_f1_stage3)
+
+    # ==================== FINAL SUMMARY ====================
+    logger.info("\n" + "=" * 70)
+    logger.info("🎉 PROGRESSIVE UNFREEZING COMPLETED!")
+    logger.info("=" * 70)
+    logger.info(f"Stage 1 Best F1: {best_f1_stage1:.5f}")
+    logger.info(f"Stage 2 Best F1: {best_f1_stage2:.5f}")
+    logger.info(f"Stage 3 Best F1: {best_f1_stage3:.5f}")
+    logger.info(f"Overall Best F1: {best_f1_overall:.5f}")
+    logger.info("=" * 70)
+
+    return best_f1_overall
+
+
+def train_single_stage(model, optimizer, criterion, scheduler,
+                       train_ds, test_ds, list_of_metrics, list_of_agg,
+                       save_on='f1_macro', stage_epochs=10, stage_name=""):
+    """
+    Train a single stage of progressive unfreezing
+    Returns best F1 score achieved in this stage
+    """
+
+    met_test_best = 0
+    patience_counter = 0
+    patience_limit = 5
+
+    for epoch in range(stage_epochs):
+        # ========== TRAINING PHASE ==========
+        model.train()
+        train_loss, steps_train = 0, 0
+        pred_logits, real_labels = np.zeros((1, OUTPUTS_a)), np.zeros((1, OUTPUTS_a))
+
+        with tqdm(total=len(train_ds), desc=f"{stage_name} Epoch {epoch}") as pbar:
+            for xdata, xtarget in train_ds:
+                xdata, xtarget = xdata.to(device), xtarget.to(device)
+
+                optimizer.zero_grad()
+                output = model(xdata)
+                loss = criterion(output, xtarget)
+                loss.backward()
+
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+                optimizer.step()
+                train_loss += loss.item()
+                steps_train += 1
+
+                pred_logits = np.vstack((pred_logits, output.detach().cpu().numpy()))
+                real_labels = np.vstack((real_labels, xtarget.cpu().numpy()))
+
+                pbar.update(1)
+                pbar.set_postfix_str(f"Train Loss: {train_loss / steps_train:.5f}")
+
+        # Calculate training metrics
+        pred_labels = pred_logits[1:].copy()
+        pred_labels[pred_labels >= THRESHOLD] = 1
+        pred_labels[pred_labels < THRESHOLD] = 0
+        train_metrics = metrics_func(list_of_metrics, list_of_agg, real_labels[1:], pred_labels)
+        avg_train_loss = train_loss / steps_train
+
+        # ========== VALIDATION PHASE ==========
+        model.eval()
+        test_loss, steps_test = 0, 0
+        pred_logits, real_labels = np.zeros((1, OUTPUTS_a)), np.zeros((1, OUTPUTS_a))
+
+        with torch.no_grad():
+            with tqdm(total=len(test_ds), desc=f"{stage_name} Validation {epoch}") as pbar:
+                for xdata, xtarget in test_ds:
+                    xdata, xtarget = xdata.to(device), xtarget.to(device)
+
+                    output = model(xdata)
+                    loss = criterion(output, xtarget)
+
+                    test_loss += loss.item()
+                    steps_test += 1
+
+                    pred_logits = np.vstack((pred_logits, output.detach().cpu().numpy()))
+                    real_labels = np.vstack((real_labels, xtarget.cpu().numpy()))
+
+                    pbar.update(1)
+                    pbar.set_postfix_str(f"Val Loss: {test_loss / steps_test:.5f}")
+
+        # Calculate validation metrics with threshold optimization
+        if epoch >= 5:  # Start optimizing after epoch 5
+            optimal_thresholds = find_optimal_threshold(pred_logits[1:], real_labels[1:])
+
+            # Apply per-class thresholds
+            pred_labels = np.zeros_like(pred_logits[1:])
+            for i, thresh in enumerate(optimal_thresholds):
+                pred_labels[:, i] = (pred_logits[1:, i] >= thresh).astype(int)
+        else:
+            # Use default threshold for early epochs
+            pred_labels = pred_logits[1:].copy()
+            pred_labels[pred_labels >= THRESHOLD] = 1
+            pred_labels[pred_labels < THRESHOLD] = 0
+
+        test_metrics = metrics_func(list_of_metrics, list_of_agg, real_labels[1:], pred_labels)
+        avg_test_loss = test_loss / steps_test
+
+        # Get F1 score
+        met_test = test_metrics[save_on]
+
+        # Logging
+        xstrres = f"{stage_name} Epoch {epoch}: "
+        for met, dat in train_metrics.items():
+            xstrres += f' Train {met} {dat:.5f}'
+        xstrres += " - "
+        for met, dat in test_metrics.items():
+            xstrres += f' Val {met} {dat:.5f}'
+
+        print(xstrres)
+        logger.info(xstrres)
+        logger.info(
+            f"LR: {optimizer.param_groups[0]['lr']:.6f} | Train loss: {avg_train_loss:.5f} | Val loss: {avg_test_loss:.5f}")
+
+        # Update scheduler
+        scheduler.step(met_test)
+
+        # Early stopping check
+        if met_test > met_test_best:
+            patience_counter = 0
+            # Save best model
+            torch.save(model.state_dict(), f"model_{NICKNAME}.pt")
+
+            # Save results
+            xdf_dset_results = xdf_dset_test.copy()
+            xfinal_pred_labels = []
+            for i in range(len(pred_labels)):
+                joined_string = ",".join(str(int(e)) for e in pred_labels[i])
+                xfinal_pred_labels.append(joined_string)
+            xdf_dset_results['results'] = xfinal_pred_labels
+            xdf_dset_results.to_excel(f'results_{NICKNAME}.xlsx', index=False)
+
+            logger.info(f"✓ NEW BEST! F1: {met_test:.5f} (previous: {met_test_best:.5f})")
+            met_test_best = met_test
+        else:
+            patience_counter += 1
+            logger.warning(f"No improvement {patience_counter}/{patience_limit}")
+
+            if patience_counter >= patience_limit:
+                logger.info(f"Early stopping at epoch {epoch}")
+                break
+
+    return met_test_best
+
+
 if __name__ == '__main__':
 
     for file in os.listdir(PATH+os.path.sep + "excel"):
@@ -547,6 +1104,21 @@ if __name__ == '__main__':
 
     # Reading and filtering Excel file
     xdf_data = pd.read_excel(FILE_NAME)
+
+    # CONFIGURATION LOGGING
+    logger.info("=" * 70)
+    logger.info("TRAINING CONFIGURATION")
+    logger.info("=" * 70)
+    logger.info(f"Log file: {log_filename}")
+    logger.info(f"Device: {device}")
+    logger.info(f"Nickname: {NICKNAME}")
+    logger.info(f"Epochs: {n_epoch}")
+    logger.info(f"Batch Size: {BATCH_SIZE}")
+    logger.info(f"Learning Rate: {LR}")
+    logger.info(f"Image Size: {IMAGE_SIZE}")
+    logger.info(f"Threshold: {THRESHOLD}")
+    logger.info(f"Excel file: {FILE_NAME}")
+    logger.info("=" * 70)
 
     ## Process Classes
     ## Input and output
@@ -558,17 +1130,95 @@ if __name__ == '__main__':
 
     ## Comment
 
-    xdf_dset = xdf_data[xdf_data["split"] == 'train'].copy()
+    xdf_train_full = xdf_data[xdf_data["split"] == 'train'].copy()
 
-    xdf_dset_test= xdf_data[xdf_data["split"] == 'test'].copy()
+    # Split training data: 85% train, 15% validation
+    # Try stratified split, fall back to regular split if fails
+    try:
+        xdf_dset, xdf_dset_test = train_test_split(
+            xdf_train_full,
+            test_size=0.15,
+            random_state=42,
+            stratify=xdf_train_full['target']
+        )
+        print("Using stratified split")
+        logger.info("Using stratified split")
+    except ValueError:
+        print("Stratified split failed (rare classes), using random split")
+        logger.warning("Stratified split failed (rare classes), using random split")
+        xdf_dset, xdf_dset_test = train_test_split(
+            xdf_train_full,
+            test_size=0.15,
+            random_state=42,
+            shuffle=True
+        )
+
+    # Reset indices so dataloader works correctly
+    xdf_dset = xdf_dset.reset_index(drop=True)
+    xdf_dset_test = xdf_dset_test.reset_index(drop=True)
+
+    print(f"Training samples: {len(xdf_dset)}")
+    print(f"Validation samples: {len(xdf_dset_test)}")
+
+    #DATASET LOGGING
+    logger.info(f"Training samples: {len(xdf_dset)}")
+    logger.info(f"Validation samples: {len(xdf_dset_test)}")
 
     ## read_data creates the dataloaders, take target_type = 2
 
-    train_ds,test_ds = read_data(target_type = 2)
+    train_ds, test_ds = read_data(target_type=2)
 
     OUTPUTS_a = len(class_names)
+
+    logger.info(f"Number of classes: {OUTPUTS_a}")
+    logger.info(f"Class names: {class_names}")
+    logger.info(f"Training batches: {len(train_ds)}")
+    logger.info(f"Validation batches: {len(test_ds)}")
+    logger.info("=" * 70)
+    logger.info("Starting training...")
+    logger.info("=" * 70)
+
 
     list_of_metrics = ['f1_macro']
     list_of_agg = ['avg']
 
-    train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro', pretrained=True)
+    #ERROR HANDLING
+    try:
+        # OPTION A: Simple training (current approach)
+        # train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg,
+        #                save_on='f1_macro', pretrained=True)
+
+        # OPTION B: Progressive unfreezing (RECOMMENDED)
+        best_f1 = train_progressive_unfreezing(
+            train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro'
+        )
+
+    except Exception as e:
+        logger.error("=" * 70)
+        logger.error("TRAINING FAILED!")
+        logger.error(f"Error: {str(e)}")
+        logger.error("=" * 70)
+        raise  # Re-raise the error
+
+    # Create a quick summary file
+    summary_file = f'training_summary_{NICKNAME}.txt'
+    with open(summary_file, 'w') as f:
+        f.write(f"Training Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Nickname: {NICKNAME}\n")
+        f.write(f"Device: {device}\n")
+        f.write(f"Epochs: {n_epoch}\n")
+        f.write(f"Learning Rate: {LR}\n")
+        f.write(f"Dropout: 0.5\n")
+        f.write(f"Weight Decay: 0.001\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Training samples: {len(xdf_dset)}\n")
+        f.write(f"Validation samples: {len(xdf_dset_test)}\n")
+        f.write(f"Number of classes: {OUTPUTS_a}\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Full log: {log_filename}\n")
+        f.write(f"Model: model_{NICKNAME}.pt\n")
+        f.write(f"Results: results_{NICKNAME}.xlsx\n")
+
+    logger.info(f"Summary saved to: {summary_file}")
+

@@ -44,12 +44,12 @@ DATA_DIR = os.path.join(PATH, 'Data')
 SPLIT = args.split
 
 
-BATCH_SIZE = 30
-LR = 0.001
+BATCH_SIZE = 32
+LR = 0.0001
 
 ## Image processing
 CHANNELS = 3
-IMAGE_SIZE = 100
+IMAGE_SIZE = 128
 
 NICKNAME = "Dora"
 
@@ -174,25 +174,62 @@ def read_data(target_type):
 
     return test_generator
 
-def model_definition(pretrained=True):
-    # Define a Keras sequential model
-    # Compile the model
 
-    # Load model matching training architecture
+def predict_with_tta(model, xdata, device, n_augmentations=4):
+    """
+    Apply Test-Time Augmentation to improve predictions
+    Averages predictions across multiple augmentations
+    """
+    model.eval()
+    predictions = []
+
+    with torch.no_grad():
+        # Original image
+        predictions.append(model(xdata.to(device)).cpu())
+
+        # Horizontal flip
+        xdata_flip = torch.flip(xdata, [3])
+        predictions.append(model(xdata_flip.to(device)).cpu())
+
+        # Brightness variations
+        for brightness in [0.9, 1.1]:
+            xdata_bright = torch.clamp(xdata * brightness, -3, 3)  # Clamp to reasonable range
+            predictions.append(model(xdata_bright.to(device)).cpu())
+
+    # Average all predictions
+    return torch.mean(torch.stack(predictions), dim=0)
+
+
+def model_definition(pretrained=True):
+    """
+    Load trained model for testing - MUST match training architecture exactly
+    """
 
     if pretrained == True:
-        model = models.resnet18(pretrained=False)  # Don't download weights again
-        # Match the training architecture with dropout
+        # Load pretrained ResNet34 (same as training)
+        model = models.resnet34(pretrained=False)
+
+        # CRITICAL: Match the EXACT classifier head from training
         num_features = model.fc.in_features
+
+        # This MUST be identical to training
         model.fc = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(num_features, OUTPUTS_a)
+            nn.Linear(num_features, 512),
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Linear(512, OUTPUTS_a)
         )
     else:
         model = CNN(OUTPUTS_a)
 
+    # Load the saved weights
     model.load_state_dict(torch.load('model_{}.pt'.format(NICKNAME), map_location=device))
     model = model.to(device)
+
+    # Set to evaluation mode
+    model.eval()
 
     print(model, file=open('summary_{}.txt'.format(NICKNAME), "w"))
 
@@ -200,8 +237,7 @@ def model_definition(pretrained=True):
 
     return model, criterion
 
-
-def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=False):
+def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
     # Create the test instructions to
     # Load the model
     # Create the loop to validate the data
@@ -217,9 +253,11 @@ def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=False):
     with torch.no_grad():
         with tqdm(total=len(test_ds), desc="Testing") as pbar:
             for xdata, xtarget in test_ds:
-                xdata, xtarget = xdata.to(device), xtarget.to(device)
+                xtarget = xtarget.to(device)
 
-                output = model(xdata)
+                # Use Test-Time Augmentation for better predictions
+                output = predict_with_tta(model, xdata, device)
+                output = output.to(device)
 
                 pred_logits = np.vstack((pred_logits, output.detach().cpu().numpy()))
                 real_labels = np.vstack((real_labels, xtarget.cpu().numpy()))
