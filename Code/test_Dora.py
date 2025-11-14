@@ -29,10 +29,18 @@ LAST UPDATED 11/10/2021, lsdr
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--path", default=None, type=str, required=False)  # Path of file
-parser.add_argument("--split", default="test", type=str, required=False)  # validate, test, train
+parser.add_argument("--path", default=None, type=str, required=False)
+parser.add_argument("--split", default="test", type=str, required=False)
+parser.add_argument("--model", default="resnet50", type=str, required=False,
+                    help="Model to test: resnet34, resnet50, vgg19, or alexnet")
+
+# FUTURE USE: Change default="resnet50" to train/test different models
+# Options: "resnet34", "resnet50", "vgg19", "alexnet"
 
 args = parser.parse_args()
+
+# Store the model name
+TEST_MODEL = args.model
 
 # If no path provided, use parent directory
 if args.path is None:
@@ -53,7 +61,7 @@ IMAGE_SIZE = 128
 
 NICKNAME = "Dora"
 
-USE_TTA = True  # Set to True to enable Test-Time Augmentation
+USE_TTA = False  # Set to True to enable Test-Time Augmentation
 
 mlb = MultiLabelBinarizer()
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -202,7 +210,7 @@ def predict_with_tta(model, xdata, device, n_augmentations=4):
     return torch.mean(torch.stack(predictions), dim=0)
 
 
-def find_optimal_thresholds_per_class(logits, targets, search_range=np.arange(0.2, 0.6, 0.05)):
+def find_optimal_thresholds_per_class(logits, targets, search_range=np.arange(0.1, 0.7, 0.05)):
     """
     Find optimal threshold for each class independently
     This optimizes F1-score for each class separately
@@ -250,36 +258,111 @@ def model_definition(pretrained=True):
     """
 
     if pretrained == True:
-        # Load pretrained ResNet34 (same as training)
-        model = models.resnet34(pretrained=False)
+        # ==================== MODEL SELECTION ====================
+        print(f"\n🔍 Loading model: {TEST_MODEL.upper()}")
 
-        # CRITICAL: Match the EXACT classifier head from training
-        num_features = model.fc.in_features
+        if TEST_MODEL == 'resnet34':
+            model = models.resnet34(pretrained=False)
+            num_features = model.fc.in_features
+            model.fc = nn.Sequential(
+                nn.Dropout(0.3),
+                nn.Linear(num_features, 512),
+                nn.ReLU(),
+                nn.BatchNorm1d(512),
+                nn.Dropout(0.2),
+                nn.Linear(512, OUTPUTS_a)
+            )
 
-        # This MUST be identical to training
-        model.fc = nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(num_features, 512),
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Dropout(0.2),
-            nn.Linear(512, OUTPUTS_a)
-        )
+        elif TEST_MODEL == 'resnet50':
+            model = models.resnet50(pretrained=False)
+            num_features = model.fc.in_features
+            model.fc = nn.Sequential(
+                nn.Dropout(0.3),
+                nn.Linear(num_features, 512),
+                nn.ReLU(),
+                nn.BatchNorm1d(512),
+                nn.Dropout(0.2),
+                nn.Linear(512, OUTPUTS_a)
+            )
+
+        elif TEST_MODEL == 'vgg19':
+            model = models.vgg19(pretrained=False)
+            model.classifier = nn.Sequential(
+                model.classifier[0],
+                nn.ReLU(True),
+                nn.Dropout(0.3),
+                model.classifier[3],
+                nn.ReLU(True),
+                nn.Dropout(0.3),
+                nn.Linear(4096, 512),
+                nn.ReLU(),
+                nn.BatchNorm1d(512),
+                nn.Dropout(0.2),
+                nn.Linear(512, OUTPUTS_a)
+            )
+
+        elif TEST_MODEL == 'alexnet':
+            model = models.alexnet(pretrained=False)
+            model.classifier = nn.Sequential(
+                nn.Dropout(0.3),
+                nn.Linear(9216, 4096),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(4096, 512),
+                nn.ReLU(),
+                nn.BatchNorm1d(512),
+                nn.Dropout(0.2),
+                nn.Linear(512, OUTPUTS_a)
+            )
+
+        else:
+            raise ValueError(f"Unknown model: {TEST_MODEL}")
+        # ========================================================
     else:
         model = CNN(OUTPUTS_a)
 
-    # Load the saved weights
-    model.load_state_dict(torch.load('model_{}.pt'.format(NICKNAME), map_location=device))
-    model = model.to(device)
+    # Try submission-ready name first, then model-specific name
+    submission_model = f'model_{NICKNAME}.pt'
+    model_specific = f'model_{NICKNAME}_{TEST_MODEL}.pt'
 
-    # Set to evaluation mode
+    if os.path.exists(submission_model):
+        model_filename = submission_model
+        print(f"📂 Loading submission model: {model_filename}")
+    elif os.path.exists(model_specific):
+        model_filename = model_specific
+        print(f"📂 Loading model-specific file: {model_filename}")
+    else:
+        print(f"❌ Error: No model file found!")
+        print(f"   Tried: {submission_model}")
+        print(f"   Tried: {model_specific}")
+        print(f"\nAvailable models:")
+        import glob
+        for f in glob.glob(f'model_{NICKNAME}*.pt'):
+            print(f"  - {f}")
+        raise FileNotFoundError(f"Model not found")
+
+    try:
+        model.load_state_dict(torch.load(model_filename, map_location=device))
+        print(f"✅ Model loaded successfully!")
+    except Exception as e:
+        print(f"❌ Error loading model: {e}")
+        raise
+
+    model = model.to(device)
     model.eval()
 
-    print(model, file=open('summary_{}.txt'.format(NICKNAME), "w"))
+    # Save both model-specific and submission-ready summaries
+    summary_filename = f'summary_{NICKNAME}_{TEST_MODEL}_test.txt'
+    print(model, file=open(summary_filename, "w"))
+
+    submission_summary = f'summary_{NICKNAME}.txt'
+    print(model, file=open(submission_summary, "w"))
+    print(f"✓ Summary saved to: {submission_summary}")
 
     criterion = nn.BCEWithLogitsLoss()
 
     return model, criterion
+
 
 def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
     # Create the test instructions to
@@ -318,12 +401,22 @@ def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
 
     # OPTIMIZE: Find best threshold for each class
     # Try to load optimal thresholds from training, otherwise optimize on test set
-    try:
-        optimal_thresholds = np.load(f'optimal_thresholds_{NICKNAME}.npy')
-        print(f"\n✅ Loaded saved optimal thresholds from training!")
+    # Try to load optimal thresholds WITH MODEL NAME
+    # Try submission-ready name first, then model-specific name
+    submission_thresh = f'optimal_thresholds_{NICKNAME}.npy'
+    model_thresh = f'optimal_thresholds_{NICKNAME}_{TEST_MODEL}.npy'
+
+    if os.path.exists(submission_thresh):
+        optimal_thresholds = np.load(submission_thresh)
+        print(f"\n✅ Loaded optimal thresholds from: {submission_thresh}")
         print(f"   Thresholds: {[f'{t:.2f}' for t in optimal_thresholds]}\n")
-    except FileNotFoundError:
-        print(f"\n⚠️  No saved thresholds found, optimizing on test set...")
+    elif os.path.exists(model_thresh):
+        optimal_thresholds = np.load(model_thresh)
+        print(f"\n✅ Loaded optimal thresholds from: {model_thresh}")
+        print(f"   Thresholds: {[f'{t:.2f}' for t in optimal_thresholds]}\n")
+    else:
+        print(f"\n⚠️  No saved thresholds found")
+        print(f"   Optimizing on test set...")
         optimal_thresholds = find_optimal_thresholds_per_class(pred_logits, real_labels)
 
     # Apply per-class thresholds
@@ -369,9 +462,19 @@ def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
         xfinal_pred_labels.append(joined_string)
 
     xdf_dset_test['results'] = xfinal_pred_labels
-    xdf_dset_test.to_excel('results_{}.xlsx'.format(NICKNAME), index=False)
 
-    print(f"\nResults saved to: results_{NICKNAME}.xlsx")
+    # Save both model-specific and submission-ready results
+    results_filename = f'results_{NICKNAME}_{TEST_MODEL}_test.xlsx'
+    xdf_dset_test.to_excel(results_filename, index=False)
+
+    submission_results = f'results_{NICKNAME}.xlsx'
+    xdf_dset_test.to_excel(submission_results, index=False)
+
+    print(f"\n✅ Results saved to:")
+    print(f"   - {results_filename} (reference)")
+    print(f"   - {submission_results} (submission)")
+    print(f"   Model: {TEST_MODEL.upper()}")
+    print(f"   F1 Score: {test_metrics['f1_macro']:.5f}")
 
 
 def metrics_func(metrics, aggregates, y_true, y_pred):

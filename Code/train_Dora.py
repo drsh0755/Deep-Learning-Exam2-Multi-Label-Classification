@@ -69,6 +69,20 @@ IMAGE_SIZE = 128
 
 NICKNAME = "Dora"
 
+# ==================== MULTI-MODEL CONFIGURATION ====================
+# To train multiple models, uncomment the full list below:
+# MODELS_TO_TRAIN = ['resnet34', 'resnet50', 'vgg19', 'alexnet']
+
+# Current configuration: ResNet50 only
+MODELS_TO_TRAIN = ['resnet50']
+CURRENT_MODEL = 'resnet50'  # Will be updated during training loop
+
+# FUTURE USE: To train different models, modify MODELS_TO_TRAIN:
+# - Single model:   ['resnet50']
+# - Multiple:       ['resnet34', 'resnet50']
+# - All models:     ['resnet34', 'resnet50', 'vgg19', 'alexnet']
+# ===================================================================
+
 mlb = MultiLabelBinarizer()
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 THRESHOLD = 0.35
@@ -267,10 +281,19 @@ def read_data(target_type):
 
     return training_generator, test_generator
 
-def save_model(model):
-    # Open the file
 
-    print(model, file=open('summary_{}.txt'.format(NICKNAME), "w"))
+def save_model(model):
+    # Save with both model-specific and submission-ready names
+
+    # Model-specific name (for reference)
+    summary_filename = f'summary_{NICKNAME}_{CURRENT_MODEL}.txt'
+    print(model, file=open(summary_filename, "w"))
+    logger.info(f"✓ Model architecture saved to: {summary_filename}")
+
+    # Submission-ready name (overwrites each time)
+    submission_filename = f'summary_{NICKNAME}.txt'
+    print(model, file=open(submission_filename, "w"))
+    logger.info(f"✓ Submission file saved to: {submission_filename}")
 
 
 def model_definition(pretrained=True, unfreeze_stage='initial', use_focal_loss=False, label_smoothing=0.0, training_data=None):
@@ -288,9 +311,26 @@ def model_definition(pretrained=True, unfreeze_stage='initial', use_focal_loss=F
     """
 
     if pretrained == True:
-        # Load pretrained ResNet34 (more capacity)
-        model = models.resnet34(pretrained=True)
-        logger.info("Using ResNet34 (larger model)")
+        # ==================== MODEL SELECTION ====================
+        if CURRENT_MODEL == 'resnet34':
+            model = models.resnet34(pretrained=True)
+            logger.info("Using ResNet34 (21M parameters)")
+
+        elif CURRENT_MODEL == 'resnet50':
+            model = models.resnet50(pretrained=True)
+            logger.info("Using ResNet50 (25M parameters)")
+
+        elif CURRENT_MODEL == 'vgg19':
+            model = models.vgg19(pretrained=True)
+            logger.info("Using VGG19 (143M parameters)")
+
+        elif CURRENT_MODEL == 'alexnet':
+            model = models.alexnet(pretrained=True)
+            logger.info("Using AlexNet (61M parameters)")
+
+        else:
+            raise ValueError(f"Unknown model: {CURRENT_MODEL}")
+        # ========================================================
 
         # Implement progressive unfreezing strategy
         if unfreeze_stage == 'initial':
@@ -331,19 +371,53 @@ def model_definition(pretrained=True, unfreeze_stage='initial', use_focal_loss=F
             raise ValueError(f"Invalid unfreeze_stage: {unfreeze_stage}")
 
         # Replace final fully connected layer with improved architecture
-        num_features = model.fc.in_features
+        # Handle different architectures
+        if CURRENT_MODEL in ['resnet34', 'resnet50']:
+            # ResNet models use 'fc'
+            num_features = model.fc.in_features
+            model.fc = nn.Sequential(
+                nn.Dropout(0.3),
+                nn.Linear(num_features, 512),
+                nn.ReLU(),
+                nn.BatchNorm1d(512),
+                nn.Dropout(0.2),
+                nn.Linear(512, OUTPUTS_a)
+            )
+            logger.info(f"✓ ResNet classifier: {num_features} → 512 → {OUTPUTS_a}")
 
-        # Enhanced classifier head with two-layer MLP
-        model.fc = nn.Sequential(
-            nn.Dropout(0.3),  # First dropout
-            nn.Linear(num_features, 512),  # Intermediate layer
-            nn.ReLU(),  # Activation
-            nn.BatchNorm1d(512),  # Batch normalization
-            nn.Dropout(0.2),  # Second dropout (lighter)
-            nn.Linear(512, OUTPUTS_a)  # Output layer
-        )
+        elif CURRENT_MODEL == 'vgg19':
+            # VGG models use 'classifier'
+            num_features = 4096  # VGG19 has 4096 features before final layer
+            model.classifier = nn.Sequential(
+                model.classifier[0],  # Keep first Linear layer
+                nn.ReLU(True),
+                nn.Dropout(0.3),
+                model.classifier[3],  # Keep second Linear layer
+                nn.ReLU(True),
+                nn.Dropout(0.3),
+                nn.Linear(4096, 512),
+                nn.ReLU(),
+                nn.BatchNorm1d(512),
+                nn.Dropout(0.2),
+                nn.Linear(512, OUTPUTS_a)
+            )
+            logger.info(f"✓ VGG classifier: 4096 → 512 → {OUTPUTS_a}")
 
-        logger.info(f"✓ Classifier head: 512 → {OUTPUTS_a} with dropout (0.3, 0.2)")
+        elif CURRENT_MODEL == 'alexnet':
+            # AlexNet uses 'classifier'
+            num_features = 4096  # AlexNet has 4096 features
+            model.classifier = nn.Sequential(
+                nn.Dropout(0.3),
+                nn.Linear(9216, 4096),  # AlexNet's first layer
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(4096, 512),
+                nn.ReLU(),
+                nn.BatchNorm1d(512),
+                nn.Dropout(0.2),
+                nn.Linear(512, OUTPUTS_a)
+            )
+            logger.info(f"✓ AlexNet classifier: 9216 → 4096 → 512 → {OUTPUTS_a}")
 
     else:
         # Use simple CNN if not pretrained
@@ -445,7 +519,7 @@ def model_definition(pretrained=True, unfreeze_stage='initial', use_focal_loss=F
     logger.info("=" * 70)
     logger.info("MODEL ARCHITECTURE")
     logger.info("=" * 70)
-    logger.info(f"Model: ResNet18 (pretrained={pretrained})")
+    logger.info(f"Model: {CURRENT_MODEL.upper()} (pretrained={pretrained})")
     logger.info(f"Total parameters: {total_params:,}")
     logger.info(f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
     logger.info(f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.1f}%)")
@@ -863,14 +937,14 @@ def train_progressive_unfreezing(train_ds, test_ds, list_of_metrics, list_of_agg
     # ==================== STAGE 1: Initial Training ====================
     logger.info("\n" + "=" * 70)
     logger.info("STAGE 1: Training final layers only (layer4 + fc)")
-    logger.info("Epochs: 10")
+    logger.info("Epochs: 15")
     logger.info("=" * 70)
 
     model, optimizer, criterion, scheduler = model_definition(
         pretrained=True,
         unfreeze_stage='initial',
-        use_focal_loss=False,
-        label_smoothing=0.1,  # Use label smoothing
+        use_focal_loss=True,
+        label_smoothing=0.0,  # Use label smoothing
         training_data=xdf_dset  # Pass training data for class weights
     )
 
@@ -878,7 +952,7 @@ def train_progressive_unfreezing(train_ds, test_ds, list_of_metrics, list_of_agg
     best_f1_stage1 = train_single_stage(
         model, optimizer, criterion, scheduler,
         train_ds, test_ds, list_of_metrics, list_of_agg,
-        save_on=save_on, stage_epochs=10, stage_name="Stage1"
+        save_on=save_on, stage_epochs=15, stage_name="Stage1"
     )
 
     logger.info(f"✓ Stage 1 completed! Best F1: {best_f1_stage1:.5f}")
@@ -887,19 +961,19 @@ def train_progressive_unfreezing(train_ds, test_ds, list_of_metrics, list_of_agg
     # ==================== STAGE 2: Partial Unfreezing ====================
     logger.info("\n" + "=" * 70)
     logger.info("STAGE 2: Unfreezing more layers (layer3 + layer4 + fc)")
-    logger.info("Epochs: 10")
+    logger.info("Epochs: 15")
     logger.info("=" * 70)
 
     model, optimizer, criterion, scheduler = model_definition(
         pretrained=True,
         unfreeze_stage='partial',
-        use_focal_loss=False,
-        label_smoothing=0.1,
+        use_focal_loss=True,
+        label_smoothing=0.0,
         training_data=xdf_dset
     )
 
-    # Load best model from stage 1
-    model.load_state_dict(torch.load(f'model_{NICKNAME}.pt'))
+    # Load best model from stage 1 WITH MODEL NAME
+    model.load_state_dict(torch.load(f'model_{NICKNAME}_{CURRENT_MODEL}.pt'))
     logger.info("✓ Loaded best model from Stage 1")
 
     # Reduce learning rate for fine-tuning
@@ -911,7 +985,7 @@ def train_progressive_unfreezing(train_ds, test_ds, list_of_metrics, list_of_agg
     best_f1_stage2 = train_single_stage(
         model, optimizer, criterion, scheduler,
         train_ds, test_ds, list_of_metrics, list_of_agg,
-        save_on=save_on, stage_epochs=10, stage_name="Stage2"
+        save_on=save_on, stage_epochs=15, stage_name="Stage2"
     )
 
     logger.info(f"✓ Stage 2 completed! Best F1: {best_f1_stage2:.5f}")
@@ -920,19 +994,19 @@ def train_progressive_unfreezing(train_ds, test_ds, list_of_metrics, list_of_agg
     # ==================== STAGE 3: Full Unfreezing ====================
     logger.info("\n" + "=" * 70)
     logger.info("STAGE 3: Fine-tuning all layers")
-    logger.info("Epochs: 10")
+    logger.info("Epochs: 15")
     logger.info("=" * 70)
 
     model, optimizer, criterion, scheduler = model_definition(
         pretrained=True,
         unfreeze_stage='full',
-        use_focal_loss=False,
-        label_smoothing=0.1,
+        use_focal_loss=True,
+        label_smoothing=0.0,
         training_data=xdf_dset
     )
 
     # Load best model from stage 2
-    model.load_state_dict(torch.load(f'model_{NICKNAME}.pt'))
+    model.load_state_dict(torch.load(f'model_{NICKNAME}_{CURRENT_MODEL}.pt'))  # ← ADD _{CURRENT_MODEL}
     logger.info("✓ Loaded best model from Stage 2")
 
     # Further reduce learning rate for full fine-tuning
@@ -944,7 +1018,7 @@ def train_progressive_unfreezing(train_ds, test_ds, list_of_metrics, list_of_agg
     best_f1_stage3 = train_single_stage(
         model, optimizer, criterion, scheduler,
         train_ds, test_ds, list_of_metrics, list_of_agg,
-        save_on=save_on, stage_epochs=10, stage_name="Stage3"
+        save_on=save_on, stage_epochs=15, stage_name="Stage3"
     )
 
     logger.info(f"✓ Stage 3 completed! Best F1: {best_f1_stage3:.5f}")
@@ -1033,18 +1107,13 @@ def train_single_stage(model, optimizer, criterion, scheduler,
                     pbar.set_postfix_str(f"Val Loss: {test_loss / steps_test:.5f}")
 
                 # Calculate validation metrics with threshold optimization
-                if epoch >= 5:  # Start optimizing after epoch 5
-                    optimal_thresholds = find_optimal_threshold(pred_logits[1:], real_labels[1:])
+                # ALWAYS optimize thresholds (removed epoch >= 5 check)
+                optimal_thresholds = find_optimal_threshold(pred_logits[1:], real_labels[1:])
 
-                    # Apply per-class thresholds
-                    pred_labels = np.zeros_like(pred_logits[1:])
-                    for i, thresh in enumerate(optimal_thresholds):
-                        pred_labels[:, i] = (pred_logits[1:, i] >= thresh).astype(int)
-                else:
-                    # Use default threshold for early epochs
-                    pred_labels = pred_logits[1:].copy()
-                    pred_labels[pred_labels >= THRESHOLD] = 1
-                    pred_labels[pred_labels < THRESHOLD] = 0
+                # Apply per-class thresholds
+                pred_labels = np.zeros_like(pred_logits[1:])
+                for i, thresh in enumerate(optimal_thresholds):
+                    pred_labels[:, i] = (pred_logits[1:, i] >= thresh).astype(int)
 
                 test_metrics = metrics_func(list_of_metrics, list_of_agg, real_labels[1:], pred_labels)
                 avg_test_loss = test_loss / steps_test
@@ -1072,22 +1141,43 @@ def train_single_stage(model, optimizer, criterion, scheduler,
                 if met_test > met_test_best:
                     patience_counter = 0
 
-                    # Save best model
-                    torch.save(model.state_dict(), f"model_{NICKNAME}.pt")
+                    # Save with both model-specific and submission-ready names
 
-                    # SAVE optimal thresholds (if we optimized them)
-                    if epoch >= 5:
-                        np.save(f'optimal_thresholds_{NICKNAME}.npy', optimal_thresholds)
-                        logger.info(f"✓ Saved optimal thresholds: {optimal_thresholds}")
+                    # Model-specific files (for reference)
+                    model_filename = f"model_{NICKNAME}_{CURRENT_MODEL}.pt"
+                    torch.save(model.state_dict(), model_filename)
+                    logger.info(f"✓ Saved model: {model_filename}")
 
-                    # Save results
+                    # Submission-ready model (overwrites each time)
+                    submission_model = f"model_{NICKNAME}.pt"
+                    torch.save(model.state_dict(), submission_model)
+                    logger.info(f"✓ Submission model saved to: {submission_model}")
+
+                    # SAVE optimal thresholds - both versions
+                    threshold_filename = f'optimal_thresholds_{NICKNAME}_{CURRENT_MODEL}.npy'
+                    np.save(threshold_filename, optimal_thresholds)
+
+                    submission_threshold = f'optimal_thresholds_{NICKNAME}.npy'
+                    np.save(submission_threshold, optimal_thresholds)
+                    logger.info(f"✓ Saved optimal thresholds: {optimal_thresholds}")
+
+                    # Save results - both versions
                     xdf_dset_results = xdf_dset_test.copy()
                     xfinal_pred_labels = []
                     for i in range(len(pred_labels)):
                         joined_string = ",".join(str(int(e)) for e in pred_labels[i])
                         xfinal_pred_labels.append(joined_string)
                     xdf_dset_results['results'] = xfinal_pred_labels
+
+                    # Model-specific results
+                    xdf_dset_results.to_excel(f'results_{NICKNAME}_{CURRENT_MODEL}.xlsx', index=False)
+
+                    # Submission-ready results (overwrites each time)
                     xdf_dset_results.to_excel(f'results_{NICKNAME}.xlsx', index=False)
+
+                    # logger.info(f"✓ Saved model: {model_filename}")
+                    # logger.info(f"✓ Saved thresholds: {threshold_filename}")
+                    # logger.info(f"✓ Saved results: results_{NICKNAME}_{CURRENT_MODEL}.xlsx")
 
                     logger.info(f"✓ NEW BEST! F1: {met_test:.5f} (previous: {met_test_best:.5f})")
                     met_test_best = met_test
@@ -1196,23 +1286,128 @@ if __name__ == '__main__':
     list_of_metrics = ['f1_macro']
     list_of_agg = ['avg']
 
-    #ERROR HANDLING
-    try:
-        # OPTION A: Simple training (current approach)
-        # train_and_test(train_ds, test_ds, list_of_metrics, list_of_agg,
-        #                save_on='f1_macro', pretrained=True)
+    # ERROR HANDLING - MULTI-MODEL TRAINING
+    best_model_name = None
+    best_model_f1 = 0.0
+    model_results = {}
 
-        # OPTION B: Progressive unfreezing (RECOMMENDED)
-        best_f1 = train_progressive_unfreezing(
-            train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro'
-        )
+    logger.info("\n" + "=" * 70)
+    logger.info("🚀 MULTI-MODEL SEQUENTIAL TRAINING")
+    logger.info("=" * 70)
+    logger.info(f"Models to train: {MODELS_TO_TRAIN}")
+    logger.info(f"Total models: {len(MODELS_TO_TRAIN)}")
+    logger.info("=" * 70)
 
-    except Exception as e:
-        logger.error("=" * 70)
-        logger.error("TRAINING FAILED!")
-        logger.error(f"Error: {str(e)}")
-        logger.error("=" * 70)
-        raise  # Re-raise the error
+    for idx, model_name in enumerate(MODELS_TO_TRAIN, 1):
+        CURRENT_MODEL = model_name
+
+        logger.info("\n" + "🔥" * 35)
+        logger.info(f"📊 MODEL {idx}/{len(MODELS_TO_TRAIN)}: {CURRENT_MODEL.upper()}")
+        logger.info("🔥" * 35 + "\n")
+
+        try:
+            # Train this model with progressive unfreezing
+            best_f1 = train_progressive_unfreezing(
+                train_ds, test_ds, list_of_metrics, list_of_agg, save_on='f1_macro'
+            )
+
+            # Track results
+            model_results[model_name] = best_f1
+
+            # Update best model tracker
+            if best_f1 > best_model_f1:
+                best_model_f1 = best_f1
+                best_model_name = model_name
+
+            logger.info("\n" + "=" * 70)
+            logger.info(f"✅ {model_name.upper()} TRAINING COMPLETED!")
+            logger.info(f"   Best F1 Score: {best_f1:.5f}")
+            logger.info(f"   Files saved:")
+            logger.info(f"     - model_{NICKNAME}_{model_name}.pt")
+            logger.info(f"     - optimal_thresholds_{NICKNAME}_{model_name}.npy")
+            logger.info(f"     - results_{NICKNAME}_{model_name}.xlsx")
+            logger.info(f"     - summary_{NICKNAME}_{model_name}.txt")
+            logger.info("=" * 70)
+
+        except Exception as e:
+            logger.error("\n" + "=" * 70)
+            logger.error(f"❌ {model_name.upper()} TRAINING FAILED!")
+            logger.error(f"Error: {str(e)}")
+            logger.error("=" * 70)
+            model_results[model_name] = 0.0
+            continue  # Continue with next model
+
+    # ==================== FINAL SUMMARY ====================
+    logger.info("\n" + "🎉" * 35)
+    logger.info("🏆 ALL MODELS TRAINING COMPLETED! 🏆")
+    logger.info("🎉" * 35)
+
+    logger.info("\n" + "=" * 70)
+    logger.info("📊 FINAL RESULTS SUMMARY")
+    logger.info("=" * 70)
+
+    # Sort results by F1 score (best to worst)
+    sorted_results = sorted(model_results.items(), key=lambda x: x[1], reverse=True)
+
+    print(f"\n{'Rank':<6} {'Model':<15} {'F1 Score':<12} {'Status'}")
+    print("-" * 70)
+    for rank, (model_name, f1_score) in enumerate(sorted_results, 1):
+        status = "⭐ BEST" if model_name == best_model_name else ""
+        print(f"#{rank:<5} {model_name:<15} {f1_score:.5f}      {status}")
+        logger.info(f"#{rank:<5} {model_name:<15} {f1_score:.5f}      {status}")
+
+    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info(f"🏆 WINNER: {best_model_name.upper()}")
+    logger.info(f"🏆 BEST F1: {best_model_f1:.5f}")
+    logger.info("=" * 70)
+
+    # Create comprehensive summary file
+    summary_file = f'FINAL_SUMMARY_{NICKNAME}.txt'
+    with open(summary_file, 'w') as f:
+        f.write("=" * 70 + "\n")
+        f.write("MULTI-MODEL TRAINING - FINAL SUMMARY\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"Training Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Nickname: {NICKNAME}\n")
+        f.write(f"Device: {device}\n")
+        f.write(f"Total Models Trained: {len(MODELS_TO_TRAIN)}\n")
+        f.write(f"Image Size: {IMAGE_SIZE}\n")
+        f.write(f"Batch Size: {BATCH_SIZE}\n")
+        f.write(f"Learning Rate: {LR}\n")
+        f.write("=" * 70 + "\n\n")
+
+        f.write("RESULTS (Best to Worst):\n")
+        f.write("-" * 70 + "\n")
+        for rank, (model_name, f1_score) in enumerate(sorted_results, 1):
+            status = "⭐ BEST MODEL" if model_name == best_model_name else ""
+            f.write(f"  #{rank}. {model_name:<15} F1 = {f1_score:.5f}  {status}\n")
+
+        f.write("\n" + "=" * 70 + "\n")
+        f.write(f"BEST MODEL: {best_model_name}\n")
+        f.write(f"BEST F1 SCORE: {best_model_f1:.5f}\n")
+        f.write("=" * 70 + "\n\n")
+
+        f.write("FILES CREATED FOR EACH MODEL:\n")
+        f.write("-" * 70 + "\n")
+        for model_name in MODELS_TO_TRAIN:
+            f.write(f"\n{model_name.upper()}:\n")
+            f.write(f"  - model_{NICKNAME}_{model_name}.pt\n")
+            f.write(f"  - optimal_thresholds_{NICKNAME}_{model_name}.npy\n")
+            f.write(f"  - results_{NICKNAME}_{model_name}.xlsx\n")
+            f.write(f"  - summary_{NICKNAME}_{model_name}.txt\n")
+
+        f.write("\n" + "=" * 70 + "\n")
+        f.write("TO TEST A SPECIFIC MODEL:\n")
+        f.write("-" * 70 + "\n")
+        f.write(f"python3 test_Dora.py --model resnet34\n")
+        f.write(f"python3 test_Dora.py --model resnet50\n")
+        f.write(f"python3 test_Dora.py --model vgg19\n")
+        f.write(f"python3 test_Dora.py --model alexnet\n")
+        f.write("\n" + "=" * 70 + "\n")
+
+    logger.info(f"\n✓ Final summary saved to: {summary_file}")
+    print(f"\n✅ All done! Check {summary_file} for complete results.")
 
     # Create a quick summary file
     summary_file = f'training_summary_{NICKNAME}.txt'
