@@ -1,0 +1,60 @@
+======================================================================
+MULTI-MODEL TRAINING - FINAL SUMMARY
+======================================================================
+Training Date: 2025-11-13 04:00:55
+Nickname: Dora
+Device: cuda:0
+Total Models Trained: 4
+Image Size: 128
+Batch Size: 32
+Learning Rate: 0.0001
+======================================================================
+
+RESULTS (Best to Worst):
+----------------------------------------------------------------------
+  #1. resnet50        F1 = 0.44742  ⭐ BEST MODEL
+  #2. resnet34        F1 = 0.42352  
+  #3. alexnet         F1 = 0.42004  
+  #4. vgg19           F1 = 0.29314  
+
+======================================================================
+BEST MODEL: resnet50
+BEST F1 SCORE: 0.44742
+======================================================================
+
+FILES CREATED FOR EACH MODEL:
+----------------------------------------------------------------------
+
+RESNET34:
+  - model_Dora_resnet34.pt
+  - optimal_thresholds_Dora_resnet34.npy
+  - results_Dora_resnet34.xlsx
+  - summary_Dora_resnet34.txt
+
+RESNET50:
+  - model_Dora_resnet50.pt
+  - optimal_thresholds_Dora_resnet50.npy
+  - results_Dora_resnet50.xlsx
+  - summary_Dora_resnet50.txt
+
+VGG19:
+  - model_Dora_vgg19.pt
+  - optimal_thresholds_Dora_vgg19.npy
+  - results_Dora_vgg19.xlsx
+  - summary_Dora_vgg19.txt
+
+ALEXNET:
+  - model_Dora_alexnet.pt
+  - optimal_thresholds_Dora_alexnet.npy
+  - results_Dora_alexnet.xlsx
+  - summary_Dora_alexnet.txt
+
+======================================================================
+TO TEST A SPECIFIC MODEL:
+----------------------------------------------------------------------
+python3 test_Dora.py --model resnet34
+python3 test_Dora.py --model resnet50
+python3 test_Dora.py --model vgg19
+python3 test_Dora.py --model alexnet
+
+======================================================================

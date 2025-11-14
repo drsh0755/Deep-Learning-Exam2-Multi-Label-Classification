@@ -70,18 +70,10 @@ IMAGE_SIZE = 128
 NICKNAME = "Dora"
 
 # ==================== MULTI-MODEL CONFIGURATION ====================
-# To train multiple models, uncomment the full list below:
-# MODELS_TO_TRAIN = ['resnet34', 'resnet50', 'vgg19', 'alexnet']
-
-# Current configuration: ResNet50 only
-MODELS_TO_TRAIN = ['resnet50']
-CURRENT_MODEL = 'resnet50'  # Will be updated during training loop
-
-# FUTURE USE: To train different models, modify MODELS_TO_TRAIN:
-# - Single model:   ['resnet50']
-# - Multiple:       ['resnet34', 'resnet50']
-# - All models:     ['resnet34', 'resnet50', 'vgg19', 'alexnet']
+MODELS_TO_TRAIN = ['resnet34', 'resnet50', 'vgg19', 'alexnet']
+CURRENT_MODEL = 'resnet34'  # Will be updated during training loop
 # ===================================================================
+
 
 mlb = MultiLabelBinarizer()
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -281,19 +273,11 @@ def read_data(target_type):
 
     return training_generator, test_generator
 
-
 def save_model(model):
-    # Save with both model-specific and submission-ready names
-
-    # Model-specific name (for reference)
+    # Open the file WITH MODEL NAME
     summary_filename = f'summary_{NICKNAME}_{CURRENT_MODEL}.txt'
     print(model, file=open(summary_filename, "w"))
     logger.info(f"✓ Model architecture saved to: {summary_filename}")
-
-    # Submission-ready name (overwrites each time)
-    submission_filename = f'summary_{NICKNAME}.txt'
-    print(model, file=open(submission_filename, "w"))
-    logger.info(f"✓ Submission file saved to: {submission_filename}")
 
 
 def model_definition(pretrained=True, unfreeze_stage='initial', use_focal_loss=False, label_smoothing=0.0, training_data=None):
@@ -1141,43 +1125,27 @@ def train_single_stage(model, optimizer, criterion, scheduler,
                 if met_test > met_test_best:
                     patience_counter = 0
 
-                    # Save with both model-specific and submission-ready names
-
-                    # Model-specific files (for reference)
+                    # Save best model WITH MODEL NAME
                     model_filename = f"model_{NICKNAME}_{CURRENT_MODEL}.pt"
                     torch.save(model.state_dict(), model_filename)
-                    logger.info(f"✓ Saved model: {model_filename}")
 
-                    # Submission-ready model (overwrites each time)
-                    submission_model = f"model_{NICKNAME}.pt"
-                    torch.save(model.state_dict(), submission_model)
-                    logger.info(f"✓ Submission model saved to: {submission_model}")
-
-                    # SAVE optimal thresholds - both versions
+                    # SAVE optimal thresholds WITH MODEL NAME
                     threshold_filename = f'optimal_thresholds_{NICKNAME}_{CURRENT_MODEL}.npy'
                     np.save(threshold_filename, optimal_thresholds)
-
-                    submission_threshold = f'optimal_thresholds_{NICKNAME}.npy'
-                    np.save(submission_threshold, optimal_thresholds)
                     logger.info(f"✓ Saved optimal thresholds: {optimal_thresholds}")
 
-                    # Save results - both versions
+                    # Save results WITH MODEL NAME
                     xdf_dset_results = xdf_dset_test.copy()
                     xfinal_pred_labels = []
                     for i in range(len(pred_labels)):
                         joined_string = ",".join(str(int(e)) for e in pred_labels[i])
                         xfinal_pred_labels.append(joined_string)
                     xdf_dset_results['results'] = xfinal_pred_labels
-
-                    # Model-specific results
                     xdf_dset_results.to_excel(f'results_{NICKNAME}_{CURRENT_MODEL}.xlsx', index=False)
 
-                    # Submission-ready results (overwrites each time)
-                    xdf_dset_results.to_excel(f'results_{NICKNAME}.xlsx', index=False)
-
-                    # logger.info(f"✓ Saved model: {model_filename}")
-                    # logger.info(f"✓ Saved thresholds: {threshold_filename}")
-                    # logger.info(f"✓ Saved results: results_{NICKNAME}_{CURRENT_MODEL}.xlsx")
+                    logger.info(f"✓ Saved model: {model_filename}")
+                    logger.info(f"✓ Saved thresholds: {threshold_filename}")
+                    logger.info(f"✓ Saved results: results_{NICKNAME}_{CURRENT_MODEL}.xlsx")
 
                     logger.info(f"✓ NEW BEST! F1: {met_test:.5f} (previous: {met_test_best:.5f})")
                     met_test_best = met_test

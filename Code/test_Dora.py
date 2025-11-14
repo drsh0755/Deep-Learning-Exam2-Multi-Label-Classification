@@ -31,11 +31,8 @@ LAST UPDATED 11/10/2021, lsdr
 parser = argparse.ArgumentParser()
 parser.add_argument("--path", default=None, type=str, required=False)
 parser.add_argument("--split", default="test", type=str, required=False)
-parser.add_argument("--model", default="resnet50", type=str, required=False,
+parser.add_argument("--model", default="resnet34", type=str, required=False,
                     help="Model to test: resnet34, resnet50, vgg19, or alexnet")
-
-# FUTURE USE: Change default="resnet50" to train/test different models
-# Options: "resnet34", "resnet50", "vgg19", "alexnet"
 
 args = parser.parse_args()
 
@@ -321,43 +318,27 @@ def model_definition(pretrained=True):
     else:
         model = CNN(OUTPUTS_a)
 
-    # Try submission-ready name first, then model-specific name
-    submission_model = f'model_{NICKNAME}.pt'
-    model_specific = f'model_{NICKNAME}_{TEST_MODEL}.pt'
-
-    if os.path.exists(submission_model):
-        model_filename = submission_model
-        print(f"📂 Loading submission model: {model_filename}")
-    elif os.path.exists(model_specific):
-        model_filename = model_specific
-        print(f"📂 Loading model-specific file: {model_filename}")
-    else:
-        print(f"❌ Error: No model file found!")
-        print(f"   Tried: {submission_model}")
-        print(f"   Tried: {model_specific}")
-        print(f"\nAvailable models:")
-        import glob
-        for f in glob.glob(f'model_{NICKNAME}*.pt'):
-            print(f"  - {f}")
-        raise FileNotFoundError(f"Model not found")
+    # Load the saved weights WITH MODEL NAME (MOVED OUTSIDE the if/else)
+    model_filename = f'model_{NICKNAME}_{TEST_MODEL}.pt'
+    print(f"📂 Loading model file: {model_filename}")
 
     try:
         model.load_state_dict(torch.load(model_filename, map_location=device))
         print(f"✅ Model loaded successfully!")
-    except Exception as e:
-        print(f"❌ Error loading model: {e}")
+    except FileNotFoundError:
+        print(f"❌ Error: Model file not found: {model_filename}")
+        print(f"Available models:")
+        import glob
+        for f in glob.glob(f'model_{NICKNAME}_*.pt'):
+            print(f"  - {f}")
         raise
 
     model = model.to(device)
     model.eval()
 
-    # Save both model-specific and submission-ready summaries
+    # Save summary with model name
     summary_filename = f'summary_{NICKNAME}_{TEST_MODEL}_test.txt'
     print(model, file=open(summary_filename, "w"))
-
-    submission_summary = f'summary_{NICKNAME}.txt'
-    print(model, file=open(submission_summary, "w"))
-    print(f"✓ Summary saved to: {submission_summary}")
 
     criterion = nn.BCEWithLogitsLoss()
 
@@ -402,20 +383,15 @@ def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
     # OPTIMIZE: Find best threshold for each class
     # Try to load optimal thresholds from training, otherwise optimize on test set
     # Try to load optimal thresholds WITH MODEL NAME
-    # Try submission-ready name first, then model-specific name
-    submission_thresh = f'optimal_thresholds_{NICKNAME}.npy'
-    model_thresh = f'optimal_thresholds_{NICKNAME}_{TEST_MODEL}.npy'
+    threshold_filename = f'optimal_thresholds_{NICKNAME}_{TEST_MODEL}.npy'
 
-    if os.path.exists(submission_thresh):
-        optimal_thresholds = np.load(submission_thresh)
-        print(f"\n✅ Loaded optimal thresholds from: {submission_thresh}")
+    try:
+        optimal_thresholds = np.load(threshold_filename)
+        print(f"\n✅ Loaded saved optimal thresholds from training!")
+        print(f"   File: {threshold_filename}")
         print(f"   Thresholds: {[f'{t:.2f}' for t in optimal_thresholds]}\n")
-    elif os.path.exists(model_thresh):
-        optimal_thresholds = np.load(model_thresh)
-        print(f"\n✅ Loaded optimal thresholds from: {model_thresh}")
-        print(f"   Thresholds: {[f'{t:.2f}' for t in optimal_thresholds]}\n")
-    else:
-        print(f"\n⚠️  No saved thresholds found")
+    except FileNotFoundError:
+        print(f"\n⚠️  No saved thresholds found: {threshold_filename}")
         print(f"   Optimizing on test set...")
         optimal_thresholds = find_optimal_thresholds_per_class(pred_logits, real_labels)
 
@@ -463,16 +439,11 @@ def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
 
     xdf_dset_test['results'] = xfinal_pred_labels
 
-    # Save both model-specific and submission-ready results
+    # Save with model name
     results_filename = f'results_{NICKNAME}_{TEST_MODEL}_test.xlsx'
     xdf_dset_test.to_excel(results_filename, index=False)
 
-    submission_results = f'results_{NICKNAME}.xlsx'
-    xdf_dset_test.to_excel(submission_results, index=False)
-
-    print(f"\n✅ Results saved to:")
-    print(f"   - {results_filename} (reference)")
-    print(f"   - {submission_results} (submission)")
+    print(f"\n✅ Results saved to: {results_filename}")
     print(f"   Model: {TEST_MODEL.upper()}")
     print(f"   F1 Score: {test_metrics['f1_macro']:.5f}")
 
