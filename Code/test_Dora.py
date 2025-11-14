@@ -53,7 +53,7 @@ IMAGE_SIZE = 128
 
 NICKNAME = "Dora"
 
-USE_TTA = False  # Set to True to enable Test-Time Augmentation
+USE_TTA = True  # Set to True to enable Test-Time Augmentation
 
 mlb = MultiLabelBinarizer()
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
