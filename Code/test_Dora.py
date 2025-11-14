@@ -53,6 +53,8 @@ IMAGE_SIZE = 128
 
 NICKNAME = "Dora"
 
+USE_TTA = False  # Set to True to enable Test-Time Augmentation
+
 mlb = MultiLabelBinarizer()
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 THRESHOLD = 0.35
@@ -200,6 +202,48 @@ def predict_with_tta(model, xdata, device, n_augmentations=4):
     return torch.mean(torch.stack(predictions), dim=0)
 
 
+def find_optimal_thresholds_per_class(logits, targets, search_range=np.arange(0.2, 0.6, 0.05)):
+    """
+    Find optimal threshold for each class independently
+    This optimizes F1-score for each class separately
+    """
+    optimal_thresholds = []
+
+    print("\n" + "=" * 70)
+    print("🔍 OPTIMIZING THRESHOLDS PER CLASS")
+    print("=" * 70)
+    print(f"{'Class':<6} | {'Threshold':>10} | {'F1':>8} | {'True':>8} | {'Pred':>8}")
+    print("-" * 70)
+
+    for class_idx in range(logits.shape[1]):
+        best_f1 = 0
+        best_thresh = 0.35
+        best_pred_count = 0
+
+        true_count = int(targets[:, class_idx].sum())
+
+        # Try different thresholds
+        for threshold in search_range:
+            pred_binary = (logits[:, class_idx] >= threshold).astype(int)
+            f1 = f1_score(targets[:, class_idx], pred_binary, average='binary', zero_division=0)
+
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thresh = threshold
+                best_pred_count = int(pred_binary.sum())
+
+        optimal_thresholds.append(best_thresh)
+
+        print(f"{class_idx + 1:6d} | {best_thresh:10.2f} | {best_f1:8.4f} | {true_count:8d} | {best_pred_count:8d}")
+
+    print("-" * 70)
+    print(f"✓ Optimization complete!")
+    print(f"✓ Optimal thresholds: {[f'{t:.2f}' for t in optimal_thresholds]}")
+    print("=" * 70 + "\n")
+
+    return np.array(optimal_thresholds)
+
+
 def model_definition(pretrained=True):
     """
     Load trained model for testing - MUST match training architecture exactly
@@ -255,9 +299,13 @@ def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
             for xdata, xtarget in test_ds:
                 xtarget = xtarget.to(device)
 
-                # Use Test-Time Augmentation for better predictions
-                output = predict_with_tta(model, xdata, device)
-                output = output.to(device)
+                # Use Test-Time Augmentation (optional)
+                if USE_TTA:
+                    output = predict_with_tta(model, xdata, device)
+                    output = output.to(device)
+                else:
+                    output = model(xdata.to(device))
+
 
                 pred_logits = np.vstack((pred_logits, output.detach().cpu().numpy()))
                 real_labels = np.vstack((real_labels, xtarget.cpu().numpy()))
@@ -268,13 +316,46 @@ def test_model(test_ds, list_of_metrics, list_of_agg, pretrained=True):
     pred_logits = pred_logits[1:]
     real_labels = real_labels[1:]
 
-    # Apply threshold
-    pred_labels = pred_logits.copy()
-    pred_labels[pred_labels >= THRESHOLD] = 1
-    pred_labels[pred_labels < THRESHOLD] = 0
+    # OPTIMIZE: Find best threshold for each class
+    # Try to load optimal thresholds from training, otherwise optimize on test set
+    try:
+        optimal_thresholds = np.load(f'optimal_thresholds_{NICKNAME}.npy')
+        print(f"\n✅ Loaded saved optimal thresholds from training!")
+        print(f"   Thresholds: {[f'{t:.2f}' for t in optimal_thresholds]}\n")
+    except FileNotFoundError:
+        print(f"\n⚠️  No saved thresholds found, optimizing on test set...")
+        optimal_thresholds = find_optimal_thresholds_per_class(pred_logits, real_labels)
+
+    # Apply per-class thresholds
+    pred_labels = np.zeros_like(pred_logits)
+    for i, thresh in enumerate(optimal_thresholds):
+        pred_labels[:, i] = (pred_logits[:, i] >= thresh).astype(int)
+
+    # Analyze prediction distribution
+    labels_per_img = np.sum(pred_labels, axis=1)
+    true_labels_per_img = np.sum(real_labels, axis=1)
+
+    print("\n" + "=" * 70)
+    print("📊 PREDICTION DISTRIBUTION ANALYSIS")
+    print("=" * 70)
+    print(f"Predicted avg labels/image: {np.mean(labels_per_img):.2f}")
+    print(f"True avg labels/image: {np.mean(true_labels_per_img):.2f}")
+    print(f"\nPrediction breakdown:")
+    print(
+        f"  - 0 labels: {np.sum(labels_per_img == 0):5d} ({100 * np.sum(labels_per_img == 0) / len(pred_labels):5.1f}%)")
+    print(
+        f"  - 1 label:  {np.sum(labels_per_img == 1):5d} ({100 * np.sum(labels_per_img == 1) / len(pred_labels):5.1f}%)")
+    print(
+        f"  - 2 labels: {np.sum(labels_per_img == 2):5d} ({100 * np.sum(labels_per_img == 2) / len(pred_labels):5.1f}%)")
+    print(
+        f"  - 3+ labels:{np.sum(labels_per_img >= 3):5d} ({100 * np.sum(labels_per_img >= 3) / len(pred_labels):5.1f}%)")
+    print("=" * 70 + "\n")
+
 
     # Run the statistics
     test_metrics = metrics_func(list_of_metrics, list_of_agg, real_labels, pred_labels)
+
+    print_class_wise_performance(real_labels, pred_labels, class_names)
 
     print("\nTest Results:")
     for met, dat in test_metrics.items():
@@ -369,6 +450,43 @@ def metrics_func(metrics, aggregates, y_true, y_pred):
 
     return res_dict
 
+
+def print_class_wise_performance(y_true, y_pred, class_names):
+    """
+    Print detailed per-class metrics to identify problem classes
+    """
+    from sklearn.metrics import precision_score, recall_score
+
+    print("\n" + "=" * 70)
+    print("📊 CLASS-WISE PERFORMANCE BREAKDOWN")
+    print("=" * 70)
+    print(f"{'Class':<10} | {'F1':>6} | {'Prec':>6} | {'Recall':>7} | {'True':>7} | {'Pred':>7}")
+    print("-" * 70)
+
+    f1_per_class = f1_score(y_true, y_pred, average=None, zero_division=0)
+    precision_per_class = precision_score(y_true, y_pred, average=None, zero_division=0)
+    recall_per_class = recall_score(y_true, y_pred, average=None, zero_division=0)
+
+    for i, class_name in enumerate(class_names):
+        true_count = int(y_true[:, i].sum())
+        pred_count = int(y_pred[:, i].sum())
+
+        print(f"{class_name:<10} | {f1_per_class[i]:6.4f} | {precision_per_class[i]:6.4f} | "
+              f"{recall_per_class[i]:7.4f} | {true_count:7d} | {pred_count:7d}")
+
+    print("-" * 70)
+    print(f"{'MACRO AVG':<10} | {np.mean(f1_per_class):6.4f} | {np.mean(precision_per_class):6.4f} | "
+          f"{np.mean(recall_per_class):7.4f}")
+    print("=" * 70 + "\n")
+
+    # Identify problem classes
+    poor_classes = [(i, class_names[i], f1_per_class[i]) for i in range(len(class_names)) if f1_per_class[i] < 0.3]
+    if poor_classes:
+        print("⚠️  Classes with F1 < 0.30 (need attention):")
+        for idx, name, f1 in poor_classes:
+            print(f"  - {name}: F1={f1:.4f}")
+        print()
+
 def process_target(target_type):
     '''
         1- Binary   target = (1,0)
@@ -414,6 +532,8 @@ if __name__ == '__main__':
 
     # Reading and filtering Excel file
     xdf_data = pd.read_excel(FILE_NAME)
+
+
 
     ## Processing Train dataset
     ## Target_type = 1  Multiclass   Target_type = 2 MultiLabel

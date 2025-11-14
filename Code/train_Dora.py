@@ -1032,66 +1032,72 @@ def train_single_stage(model, optimizer, criterion, scheduler,
                     pbar.update(1)
                     pbar.set_postfix_str(f"Val Loss: {test_loss / steps_test:.5f}")
 
-        # Calculate validation metrics with threshold optimization
-        if epoch >= 5:  # Start optimizing after epoch 5
-            optimal_thresholds = find_optimal_threshold(pred_logits[1:], real_labels[1:])
+                # Calculate validation metrics with threshold optimization
+                if epoch >= 5:  # Start optimizing after epoch 5
+                    optimal_thresholds = find_optimal_threshold(pred_logits[1:], real_labels[1:])
 
-            # Apply per-class thresholds
-            pred_labels = np.zeros_like(pred_logits[1:])
-            for i, thresh in enumerate(optimal_thresholds):
-                pred_labels[:, i] = (pred_logits[1:, i] >= thresh).astype(int)
-        else:
-            # Use default threshold for early epochs
-            pred_labels = pred_logits[1:].copy()
-            pred_labels[pred_labels >= THRESHOLD] = 1
-            pred_labels[pred_labels < THRESHOLD] = 0
+                    # Apply per-class thresholds
+                    pred_labels = np.zeros_like(pred_logits[1:])
+                    for i, thresh in enumerate(optimal_thresholds):
+                        pred_labels[:, i] = (pred_logits[1:, i] >= thresh).astype(int)
+                else:
+                    # Use default threshold for early epochs
+                    pred_labels = pred_logits[1:].copy()
+                    pred_labels[pred_labels >= THRESHOLD] = 1
+                    pred_labels[pred_labels < THRESHOLD] = 0
 
-        test_metrics = metrics_func(list_of_metrics, list_of_agg, real_labels[1:], pred_labels)
-        avg_test_loss = test_loss / steps_test
+                test_metrics = metrics_func(list_of_metrics, list_of_agg, real_labels[1:], pred_labels)
+                avg_test_loss = test_loss / steps_test
 
-        # Get F1 score
-        met_test = test_metrics[save_on]
+                # Get F1 score
+                met_test = test_metrics[save_on]
 
-        # Logging
-        xstrres = f"{stage_name} Epoch {epoch}: "
-        for met, dat in train_metrics.items():
-            xstrres += f' Train {met} {dat:.5f}'
-        xstrres += " - "
-        for met, dat in test_metrics.items():
-            xstrres += f' Val {met} {dat:.5f}'
+                # Logging
+                xstrres = f"{stage_name} Epoch {epoch}: "
+                for met, dat in train_metrics.items():
+                    xstrres += f' Train {met} {dat:.5f}'
+                xstrres += " - "
+                for met, dat in test_metrics.items():
+                    xstrres += f' Val {met} {dat:.5f}'
 
-        print(xstrres)
-        logger.info(xstrres)
-        logger.info(
-            f"LR: {optimizer.param_groups[0]['lr']:.6f} | Train loss: {avg_train_loss:.5f} | Val loss: {avg_test_loss:.5f}")
+                print(xstrres)
+                logger.info(xstrres)
+                logger.info(
+                    f"LR: {optimizer.param_groups[0]['lr']:.6f} | Train loss: {avg_train_loss:.5f} | Val loss: {avg_test_loss:.5f}")
 
-        # Update scheduler
-        scheduler.step(met_test)
+                # Update scheduler
+                scheduler.step(met_test)
 
-        # Early stopping check
-        if met_test > met_test_best:
-            patience_counter = 0
-            # Save best model
-            torch.save(model.state_dict(), f"model_{NICKNAME}.pt")
+                # Early stopping check
+                if met_test > met_test_best:
+                    patience_counter = 0
 
-            # Save results
-            xdf_dset_results = xdf_dset_test.copy()
-            xfinal_pred_labels = []
-            for i in range(len(pred_labels)):
-                joined_string = ",".join(str(int(e)) for e in pred_labels[i])
-                xfinal_pred_labels.append(joined_string)
-            xdf_dset_results['results'] = xfinal_pred_labels
-            xdf_dset_results.to_excel(f'results_{NICKNAME}.xlsx', index=False)
+                    # Save best model
+                    torch.save(model.state_dict(), f"model_{NICKNAME}.pt")
 
-            logger.info(f"✓ NEW BEST! F1: {met_test:.5f} (previous: {met_test_best:.5f})")
-            met_test_best = met_test
-        else:
-            patience_counter += 1
-            logger.warning(f"No improvement {patience_counter}/{patience_limit}")
+                    # SAVE optimal thresholds (if we optimized them)
+                    if epoch >= 5:
+                        np.save(f'optimal_thresholds_{NICKNAME}.npy', optimal_thresholds)
+                        logger.info(f"✓ Saved optimal thresholds: {optimal_thresholds}")
 
-            if patience_counter >= patience_limit:
-                logger.info(f"Early stopping at epoch {epoch}")
-                break
+                    # Save results
+                    xdf_dset_results = xdf_dset_test.copy()
+                    xfinal_pred_labels = []
+                    for i in range(len(pred_labels)):
+                        joined_string = ",".join(str(int(e)) for e in pred_labels[i])
+                        xfinal_pred_labels.append(joined_string)
+                    xdf_dset_results['results'] = xfinal_pred_labels
+                    xdf_dset_results.to_excel(f'results_{NICKNAME}.xlsx', index=False)
+
+                    logger.info(f"✓ NEW BEST! F1: {met_test:.5f} (previous: {met_test_best:.5f})")
+                    met_test_best = met_test
+                else:
+                    patience_counter += 1
+                    logger.warning(f"No improvement {patience_counter}/{patience_limit}")
+
+                    if patience_counter >= patience_limit:
+                        logger.info(f"Early stopping at epoch {epoch}")
+                        break
 
     return met_test_best
 
@@ -1104,6 +1110,26 @@ if __name__ == '__main__':
 
     # Reading and filtering Excel file
     xdf_data = pd.read_excel(FILE_NAME)
+
+    print("\n" + "=" * 70)
+    print("⚠️  DATA VALIDATION CHECK")
+    print("=" * 70)
+    print(f"Total rows in Excel: {len(xdf_data)}")
+    print(f"\nSplit distribution:")
+    print(xdf_data['split'].value_counts())
+    print(f"\nUnique values in 'split' column: {xdf_data['split'].unique()}")
+
+    # Check for duplicates
+    duplicates = xdf_data.duplicated(subset=['id']).sum()
+    print(f"\nDuplicate rows (by 'id'): {duplicates}")
+
+    if duplicates > 0:
+        print(f"⚠️  WARNING: Found {duplicates} duplicate image IDs!")
+        print("Removing duplicates...")
+        xdf_data = xdf_data.drop_duplicates(subset=['id'], keep='first')
+        print(f"✓ After deduplication: {len(xdf_data)} rows")
+
+    print("=" * 70 + "\n")
 
     # CONFIGURATION LOGGING
     logger.info("=" * 70)
